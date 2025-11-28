@@ -191,24 +191,29 @@ st.title("⚽ AI Football Sniper Ultimate")
 st.sidebar.header("Ustawienia")
 
 league_config = {
-    "Bundesliga": {"roi_1x2": 0.29, "roi_ou": -14.85, "recom": "🟡 MAŁY ZYSK (Ostrożnie)"},
-    "Bundesliga 2": {"roi_1x2": -9.44, "roi_ou": -25.80, "recom": "⛔ UNIKAJ TEJ LIGI"},
-    "Championship": {"roi_1x2": 14.31, "roi_ou": -3.81, "recom": "🔥 GRAJ ZWYCIĘZCĘ (1X2)"},
-    "Eredivisie": {"roi_1x2": 26.59, "roi_ou": -18.47, "recom": "🔥 GRAJ ZWYCIĘZCĘ (1X2)"},
-    "Greece Super League": {"roi_1x2": 38.11, "roi_ou": 20.05, "recom": "🔥 GRAJ WSZYSTKO"},
-    "Jupiler League": {"roi_1x2": -29.22, "roi_ou": 9.95, "recom": "🔥 GRAJ GOLE (O/U)"},
-    "La Liga": {"roi_1x2": 5.95, "roi_ou": 44.56, "recom": "🔥 GRAJ GOLE (O/U)"},
-    "La Liga 2": {"roi_1x2": -14.14, "roi_ou": 9.80, "recom": "🔥 GRAJ GOLE (O/U)"},
-    "League One": {"roi_1x2": 6.36, "roi_ou": -14.27, "recom": "🔥 GRAJ ZWYCIĘZCĘ (1X2)"},
-    "League Two": {"roi_1x2": -15.54, "roi_ou": 11.74, "recom": "🔥 GRAJ GOLE (O/U)"},
-    "Liga Portugal": {"roi_1x2": -18.10, "roi_ou": -0.18, "recom": "⛔ UNIKAJ TEJ LIGI"},
-    "Ligue 1": {"roi_1x2": -43.09, "roi_ou": -9.61, "recom": "⛔ UNIKAJ TEJ LIGI"},
-    "Ligue 2": {"roi_1x2": -36.91, "roi_ou": -28.99, "recom": "⛔ UNIKAJ TEJ LIGI"},
-    "Premier League": {"roi_1x2": -9.73, "roi_ou": -22.39, "recom": "⛔ UNIKAJ TEJ LIGI"},
-    "Scottish Premiership": {"roi_1x2": 34.72, "roi_ou": -9.43, "recom": "🔥 GRAJ ZWYCIĘZCĘ (1X2)"},
-    "Serie A": {"roi_1x2": 49.42, "roi_ou": -15.18, "recom": "🔥 GRAJ ZWYCIĘZCĘ (1X2)"},
-    "Serie B": {"roi_1x2": -20.08, "roi_ou": 13.05, "recom": "🔥 GRAJ GOLE (O/U)"},
-    "Super Lig": {"roi_1x2": -1.37, "roi_ou": 17.20, "recom": "🔥 GRAJ GOLE (O/U)"},
+    # GRUPA "ELITA" (Graj Odważnie)
+    "Serie B": {"roi_1x2": 35.46, "roi_ou": 6.29, "recom": "🔥 GRAJ WSZYSTKO"},
+    "Bundesliga": {"roi_1x2": 23.58, "roi_ou": 5.63, "recom": "🔥 GRAJ WSZYSTKO (Nowy Król!)"},
+    "Greece Super League": {"roi_1x2": 15.68, "roi_ou": 34.88, "recom": "🔥 GRAJ WSZYSTKO"},
+    "Championship": {"roi_1x2": 12.55, "roi_ou": 14.51, "recom": "🔥 GRAJ WSZYSTKO"},
+
+    # GRUPA "SOLIDNE" (Wybieraj konkretne rynki)
+    "Serie A": {"roi_1x2": 13.97, "roi_ou": -4.63, "recom": "✅ GRAJ ZWYCIĘZCĘ (1X2)"},
+    "La Liga 2": {"roi_1x2": 16.89, "roi_ou": 4.25, "recom": "✅ GRAJ ZWYCIĘZCĘ (1X2)"},
+    "Scottish Premiership": {"roi_1x2": 9.43, "roi_ou": -44.03, "recom": "✅ GRAJ ZWYCIĘZCĘ (1X2)"},
+    "Jupiler League": {"roi_1x2": -31.89, "roi_ou": 23.39, "recom": "✅ GRAJ GOLE (O/U)"},
+    "Super Lig": {"roi_1x2": -2.77, "roi_ou": 8.82, "recom": "✅ GRAJ GOLE (O/U)"},
+
+    # GRUPA "CZERWONA" (Ignoruj)
+    "Premier League": {"roi_1x2": -16.94, "roi_ou": -29.05, "recom": "⛔ UNIKAJ (Strata pieniędzy)"},
+    "La Liga": {"roi_1x2": -17.99, "roi_ou": -13.01, "recom": "⛔ UNIKAJ (Za trudna technicznie)"},
+    "Ligue 1": {"roi_1x2": -52.57, "roi_ou": -27.77, "recom": "⛔ UNIKAJ"},
+    "Ligue 2": {"roi_1x2": -36.25, "roi_ou": -46.01, "recom": "⛔ UNIKAJ"},
+    "Eredivisie": {"roi_1x2": -11.15, "roi_ou": -30.33, "recom": "⛔ UNIKAJ"},
+    "Liga Portugal": {"roi_1x2": -9.40, "roi_ou": -36.63, "recom": "⛔ UNIKAJ"},
+    "League One": {"roi_1x2": -6.32, "roi_ou": -29.06, "recom": "⛔ UNIKAJ"},
+    "League Two": {"roi_1x2": -15.83, "roi_ou": -6.65, "recom": "⛔ UNIKAJ"},
+    "Bundesliga 2": {"roi_1x2": -0.02, "roi_ou": -33.51, "recom": "⛔ UNIKAJ"},
 }
 
 selected_league = st.sidebar.selectbox("Wybierz Ligę", sorted(list(league_config.keys())))
