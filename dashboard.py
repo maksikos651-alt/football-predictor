@@ -429,18 +429,18 @@ with tab3:
             probs = model.predict_proba(clean_input)[0]
             if (probs[2] * row['B365H']) - 1 > 0.1:
                 pick = "HOME";
-                res = "🟢" if row['FTR'] == 'H' else "🔴"
+                res = "🟢 WIN" if row['FTR'] == 'H' else "🔴 LOSS"
             elif (probs[0] * row['B365A']) - 1 > 0.1:
                 pick = "AWAY";
-                res = "🟢" if row['FTR'] == 'A' else "🔴"
+                res = "🟢 WIN" if row['FTR'] == 'A' else "🔴 LOSS"
         else:
             p_over = model.predict_proba(clean_input)[0][1]
             if (p_over * row['B365_O25']) - 1 > 0.1:
                 pick = "OVER";
-                res = "🟢" if (row['FTHG'] + row['FTAG']) > 2.5 else "🔴"
+                res = "🟢 WIN" if (row['FTHG'] + row['FTAG']) > 2.5 else "🔴 LOSS"
             elif ((1 - p_over) * row['B365_U25']) - 1 > 0.1:
                 pick = "UNDER";
-                res = "🟢" if (row['FTHG'] + row['FTAG']) < 2.5 else "🔴"
+                res = "🟢 WIN" if (row['FTHG'] + row['FTAG']) < 2.5 else "🔴 LOSS"
 
         rows.append(
             {"Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}", "Wynik": f"{int(row['FTHG'])}-{int(row['FTAG'])}",
