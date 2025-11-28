@@ -14,18 +14,24 @@ st.set_page_config(page_title="AI Football Predictor", layout="wide")
 
 # --- 1. FUNKCJE SILNIKA ---
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=60) # Zmieniamy cache na 60 sekund do testów
 def get_upcoming_fixtures(league_name):
     url = "https://www.football-data.co.uk/fixtures.csv"
 
     try:
-        # 1. Wczytujemy (ignorując błędy linii)
+        # Wczytujemy surowy plik
         df = pd.read_csv(url, encoding='latin1', on_bad_lines='skip')
 
-        # Usuwamy spacje z nazw kolumn (częsty błąd w plikach CSV)
+        # --- DIAGNOSTYKA (Pokaże się na górze strony) ---
+        st.warning("--- TRYB DIAGNOSTYCZNY ---")
+        st.write(f"1. Pobrano wierszy z internetu: {len(df)}")
+
+        if not df.empty:
+             st.write("2. Przykładowe daty z pliku:", df['Date'].head(3).tolist())
+        # -----------------------------------------------
+
         df.columns = df.columns.str.strip()
 
-        # Mapa kodów lig
         league_map = {
             "Premier League": "E0", "Championship": "E1",
             "La Liga": "SP1", "Bundesliga": "D1",
@@ -33,27 +39,30 @@ def get_upcoming_fixtures(league_name):
         }
         div_code = league_map.get(league_name)
 
-        # 2. Sprawdzamy czy mamy kolumnę Div (jak nie, to plik jest zły)
-        if 'Div' not in df.columns:
-            return pd.DataFrame()
-
-        # 3. Filtrujemy ligę
+        # Filtrujemy ligę
         league_fixtures = df[df['Div'] == div_code].copy()
+        st.write(f"3. Wierszy dla ligi {league_name}: {len(league_fixtures)}")
 
-        # 4. Formatujemy datę
+        # Formatujemy datę
         league_fixtures['Date'] = pd.to_datetime(league_fixtures['Date'], dayfirst=True, errors='coerce')
 
-        # 5. FILTR CZASU: Usuwamy mecze, które już były!
-        # Bierzemy dzisiejszą datę (bez godziny)
+        # Filtr czasu
         today = pd.Timestamp.now().normalize()
-        # Zostawiamy tylko mecze od dzisiaj w górę
-        league_fixtures = league_fixtures[league_fixtures['Date'] >= today]
+        future_games = league_fixtures[league_fixtures['Date'] >= today]
 
-        league_fixtures = league_fixtures.sort_values(['Date', 'Time'])
+        st.write(f"4. Wierszy po filtrze daty (od {today.date()}): {len(future_games)}")
 
-        return league_fixtures
+        if len(future_games) > 0:
+            st.success("✅ Znaleziono mecze! Sprawdź listę w panelu bocznym.")
+        else:
+            st.error("❌ Brak nadchodzących meczów (prawdopodobnie stare dane w pliku).")
 
-    except Exception:
+        st.write("----------------------------")
+
+        return future_games.sort_values(['Date', 'Time'])
+
+    except Exception as e:
+        st.error(f"Błąd krytyczny: {e}")
         return pd.DataFrame()
 
 
