@@ -366,13 +366,8 @@ with tab2:
         h_stats = processed_data[processed_data['HomeTeam'] == home_team].iloc[-1]
         a_stats = processed_data[processed_data['AwayTeam'] == away_team].iloc[-1]
 
-        # Logika predykcji (taka sama jak w skanerze)
-        # ... (skrótowo, bo mamy to w tab1) ...
-        # Tutaj pełna wizualizacja z heatmapą
-
+        # Tworzymy Input
         input_data = pd.DataFrame([{
-            'OddsDiff': (1 / (o1 if bet_type == "Zwycięzca (1X2)" else oo)) - (
-                        1 / (o2 if bet_type == "Zwycięzca (1X2)" else ou)),
             'Home_Att': h_stats['Home_Att'], 'Away_Att': a_stats['Away_Att'],
             'Home_Def': h_stats['Home_Def'], 'Away_Def': a_stats['Away_Def'],
             'Home_Form': h_stats['Home_Form'], 'Away_Form': a_stats['Away_Form'],
@@ -380,17 +375,30 @@ with tab2:
         }])
 
         if bet_type == "Zwycięzca (1X2)":
+            input_data['OddsDiff'] = (1 / o1) - (1 / o2)
             input_data['B365H'] = o1;
             input_data['B365D'] = ox;
             input_data['B365A'] = o2
+
+            # --- NAPRAWA BŁĘDU (Sortowanie kolumn) ---
+            input_data = input_data[features]
+            # -----------------------------------------
+
             probs = model.predict_proba(input_data)[0]
             outcomes = [("GOSPODARZ", probs[2], o1), ("REMIS", probs[1], ox), ("GOŚĆ", probs[0], o2)]
         else:
+            input_data['OddsDiff'] = (1 / oo) - (1 / ou)
             input_data['B365_O25'] = oo;
             input_data['B365_U25'] = ou
+
+            # --- NAPRAWA BŁĘDU (Sortowanie kolumn) ---
+            input_data = input_data[features]
+            # -----------------------------------------
+
             p_over = model.predict_proba(input_data)[0][1]
             outcomes = [("OVER 2.5", p_over, oo), ("UNDER 2.5", 1 - p_over, ou)]
 
+        # Wyświetlanie wyników
         c_res = st.columns(len(outcomes))
         for i, (lbl, p, o) in enumerate(outcomes):
             with c_res[i]:
