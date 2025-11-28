@@ -3,13 +3,12 @@ import pandas as pd
 import numpy as np
 import xgboost as xgb
 from sqlalchemy import create_engine
-from datetime import datetime
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import poisson
 
 # --- KONFIGURACJA STRONY ---
-st.set_page_config(page_title="AI Football Predictor", layout="wide")
+st.set_page_config(page_title="AI Football Predictor 2.0", layout="wide")
 
 
 # --- 1. FUNKCJE SILNIKA ---
@@ -17,74 +16,58 @@ st.set_page_config(page_title="AI Football Predictor", layout="wide")
 @st.cache_data(ttl=3600)
 def get_upcoming_fixtures(league_name):
     url = "https://www.football-data.co.uk/fixtures.csv"
-
     try:
-        # ZMIANA: 'utf-8-sig' automatycznie usuwa te dziwne znaki (ï»¿) na początku
+        # Kodowanie utf-8-sig usuwa "krzaczki" (BOM)
         df = pd.read_csv(url, encoding='utf-8-sig', on_bad_lines='skip')
-
-        # Czyszczenie nazw kolumn (usuwamy spacje)
         df.columns = df.columns.str.strip()
 
-        # Zabezpieczenie: Jeśli mimo zmiany kodowania nadal jest błąd w nazwie
-        # (np. admin strony zmieni format), szukamy kolumny zawierającej 'Div'
+        # Auto-naprawa nazwy kolumny Div
         if 'Div' not in df.columns:
             for col in df.columns:
-                if 'Div' in col:
+                if 'Div' in col or 'Division' in col:
                     df = df.rename(columns={col: 'Div'})
                     break
 
-        # Jeśli nadal pusto - zwracamy pusty wynik (Dashboard pokaże "Wybierz ręcznie")
-        if 'Div' not in df.columns:
-            return pd.DataFrame()
+        if 'Div' not in df.columns: return pd.DataFrame()
 
-        # Reszta logiki (Mapowanie lig)
         league_map = {
-            "Premier League": "E0",
-            "Championship": "E1",
-            "League One": "E2",
-            "League Two": "E3",
-            "Bundesliga": "D1",
-            "Bundesliga 2": "D2",
-            "Serie A": "I1",
-            "Serie B": "I2",
-            "La Liga": "SP1",
-            "La Liga 2": "SP2",
-            "Ligue 1": "F1",
-            "Ligue 2": "F2",
-            "Eredivisie": "N1",
-            "Jupiler League": "B1",
-            "Liga Portugal": "P1",
-            "Super Lig": "T1",
-            "Greece Super League": "G1",
-            "Scottish Premiership": "SC0"
+            "Premier League": "E0", "Championship": "E1", "League One": "E2", "League Two": "E3",
+            "La Liga": "SP1", "La Liga 2": "SP2",
+            "Bundesliga": "D1", "Bundesliga 2": "D2",
+            "Serie A": "I1", "Serie B": "I2",
+            "Ligue 1": "F1", "Ligue 2": "F2",
+            "Eredivisie": "N1", "Jupiler League": "B1", "Liga Portugal": "P1",
+            "Super Lig": "T1", "Greece Super League": "G1", "Scottish Premiership": "SC0"
         }
-        div_code = league_map.get(league_name)
 
-        # Filtrujemy ligę
+        div_code = league_map.get(league_name)
         league_fixtures = df[df['Div'] == div_code].copy()
 
-        # Formatowanie daty
         league_fixtures['Date'] = pd.to_datetime(league_fixtures['Date'], dayfirst=True, errors='coerce')
 
-        # Filtr daty (od dzisiaj w górę)
+        # Filtr: Tylko mecze od dzisiaj w górę
         today = pd.Timestamp.now().normalize()
         future_games = league_fixtures[league_fixtures['Date'] >= today]
 
         return future_games.sort_values(['Date', 'Time'])
 
     except Exception:
-        # W razie błędu po prostu zwracamy puste dane, bez straszenia użytkownika
         return pd.DataFrame()
 
 
 @st.cache_data(ttl=3600)
 def load_and_prep_data(league_name):
-    # POBIERAMY URL BAZY Z SEKRETÓW STREAMLIT CLOUD (Bezpiecznie!)
-    db_url = st.secrets["DB_URL"]
-
-    engine = create_engine(db_url)
-
-
+    # HYBRYDOWE POŁĄCZENIE (Działa lokalnie i w chmurze)
+    try:
+        # Próba 1: Chmura (Streamlit Secrets)
+        db_url = st.secrets["DB_URL"]
+        engine = create_engine(db_url)
+    except:
+        # Próba 2: Lokalnie (Twój komputer)
+        DB_USER = 'postgres'
+        DB_PASS = 'EAtocepy12!'
+        DB_HOST = 'localhost'
+        engine = create_engine(f'postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:5432/postgres')
 
     query = f"SELECT * FROM matches WHERE league = '{league_name}' ORDER BY date ASC"
     df = pd.read_sql(query, engine)
@@ -92,11 +75,9 @@ def load_and_prep_data(league_name):
     df = df.rename(columns={
         'date': 'Date', 'home_team': 'HomeTeam', 'away_team': 'AwayTeam',
         'home_goals': 'FTHG', 'away_goals': 'FTAG', 'result': 'FTR',
-        'home_shots_target': 'HST', 'away_shots_target': 'AST',
         'odds_home': 'B365H', 'odds_draw': 'B365D', 'odds_away': 'B365A',
         'odds_over25': 'B365_O25', 'odds_under25': 'B365_U25',
-        'home_corners': 'HC', 'away_corners': 'AC',
-        'home_red': 'HR', 'away_red': 'AR'
+        'home_corners': 'HC', 'away_corners': 'AC'
     })
     return df
 
@@ -106,47 +87,36 @@ def add_rolling_features(df, window=5):
 
     # 1. Home
     home_df = data[['Date', 'HomeTeam', 'FTHG', 'FTAG', 'FTR', 'HC', 'AC']].rename(
-        columns={'HomeTeam': 'Team', 'FTHG': 'GoalsScored', 'FTAG': 'GoalsConceded',
-                 'HC': 'CornersWon', 'AC': 'CornersLost'}
-    )
-    home_df['Points'] = np.where(home_df['FTR'] == 'H', 3, np.where(home_df['FTR'] == 'D', 1, 0))
+        columns={'HomeTeam': 'Team', 'FTHG': 'GS', 'FTAG': 'GC', 'HC': 'CorW', 'AC': 'CorL'})
+    home_df['Pts'] = np.where(home_df['FTR'] == 'H', 3, np.where(home_df['FTR'] == 'D', 1, 0))
     home_df['IsHome'] = 1
 
     # 2. Away
     away_df = data[['Date', 'AwayTeam', 'FTAG', 'FTHG', 'FTR', 'AC', 'HC']].rename(
-        columns={'AwayTeam': 'Team', 'FTAG': 'GoalsScored', 'FTHG': 'GoalsConceded',
-                 'AC': 'CornersWon', 'HC': 'CornersLost'}
-    )
-    away_df['Points'] = np.where(away_df['FTR'] == 'A', 3, np.where(away_df['FTR'] == 'D', 1, 0))
+        columns={'AwayTeam': 'Team', 'FTAG': 'GS', 'FTHG': 'GC', 'AC': 'CorW', 'HC': 'CorL'})
+    away_df['Pts'] = np.where(away_df['FTR'] == 'A', 3, np.where(away_df['FTR'] == 'D', 1, 0))
     away_df['IsHome'] = 0
 
     # 3. Rolling
     team_stats = pd.concat([home_df, away_df]).sort_values('Date')
-    features = team_stats.groupby('Team')[['GoalsScored', 'GoalsConceded', 'Points', 'CornersWon']].transform(
+    features = team_stats.groupby('Team')[['GS', 'GC', 'Pts', 'CorW']].transform(
         lambda x: x.rolling(window, min_periods=3).mean().shift(1)
     )
 
-    team_stats['Form_Goals'] = features['GoalsScored']
-    team_stats['Form_Defense'] = features['GoalsConceded']
-    team_stats['Form_Points'] = features['Points']
-    team_stats['Form_Corners'] = features['CornersWon']
+    team_stats[['Form_Att', 'Form_Def', 'Form_Pts', 'Form_Cor']] = features
 
-    # 4. Merge back
-    stats_home = team_stats[team_stats['IsHome'] == 1][
-        ['Date', 'Team', 'Form_Goals', 'Form_Defense', 'Form_Points', 'Form_Corners']]
-    stats_home = stats_home.rename(
-        columns={'Team': 'HomeTeam', 'Form_Goals': 'Home_Att', 'Form_Defense': 'Home_Def', 'Form_Points': 'Home_Form',
-                 'Form_Corners': 'Home_Corners_Avg'})
+    # 4. Merge
+    h_stats = team_stats[team_stats['IsHome'] == 1][
+        ['Date', 'Team', 'Form_Att', 'Form_Def', 'Form_Pts', 'Form_Cor']].rename(
+        columns={'Team': 'HomeTeam', 'Form_Att': 'Home_Att', 'Form_Def': 'Home_Def', 'Form_Pts': 'Home_Form',
+                 'Form_Cor': 'Home_Corners_Avg'})
+    a_stats = team_stats[team_stats['IsHome'] == 0][
+        ['Date', 'Team', 'Form_Att', 'Form_Def', 'Form_Pts', 'Form_Cor']].rename(
+        columns={'Team': 'AwayTeam', 'Form_Att': 'Away_Att', 'Form_Def': 'Away_Def', 'Form_Pts': 'Away_Form',
+                 'Form_Cor': 'Away_Corners_Avg'})
 
-    stats_away = team_stats[team_stats['IsHome'] == 0][
-        ['Date', 'Team', 'Form_Goals', 'Form_Defense', 'Form_Points', 'Form_Corners']]
-    stats_away = stats_away.rename(
-        columns={'Team': 'AwayTeam', 'Form_Goals': 'Away_Att', 'Form_Defense': 'Away_Def', 'Form_Points': 'Away_Form',
-                 'Form_Corners': 'Away_Corners_Avg'})
-
-    data = pd.merge(data, stats_home, on=['Date', 'HomeTeam'], how='left')
-    data = pd.merge(data, stats_away, on=['Date', 'AwayTeam'], how='left')
-
+    data = pd.merge(data, h_stats, on=['Date', 'HomeTeam'], how='left')
+    data = pd.merge(data, a_stats, on=['Date', 'AwayTeam'], how='left')
     data['OddsDiff'] = (1 / data['B365H']) - (1 / data['B365A'])
 
     return data.dropna()
@@ -154,33 +124,21 @@ def add_rolling_features(df, window=5):
 
 @st.cache_resource
 def train_model(df, prediction_type="1X2"):
-    predictors = [
-        'OddsDiff',
-        'Home_Att', 'Away_Att',
-        'Home_Def', 'Away_Def',
-        'Home_Form', 'Away_Form',
-        'Home_Corners_Avg', 'Away_Corners_Avg'
-    ]
+    predictors = ['OddsDiff', 'Home_Att', 'Away_Att', 'Home_Def', 'Away_Def', 'Home_Form', 'Away_Form',
+                  'Home_Corners_Avg', 'Away_Corners_Avg']
 
-    # Parametry z Twojej optymalizacji
-    best_params = {
-        'n_estimators': 300, 'learning_rate': 0.01, 'max_depth': 4,
-        'subsample': 0.7, 'colsample_bytree': 0.8, 'random_state': 42, 'n_jobs': -1
-    }
+    # Parametry z Optymalizacji
+    best_params = {'n_estimators': 300, 'learning_rate': 0.01, 'max_depth': 4, 'subsample': 0.7,
+                   'colsample_bytree': 0.8, 'n_jobs': -1}
 
     if prediction_type == "1X2":
         predictors += ['B365H', 'B365A', 'B365D']
-        target_map = {'A': 0, 'D': 1, 'H': 2}
-        df['Target_Multi'] = df['FTR'].map(target_map)
-
+        df['Target'] = df['FTR'].map({'A': 0, 'D': 1, 'H': 2})
         model = xgb.XGBClassifier(objective='multi:softprob', num_class=3, **best_params)
-        model.fit(df[predictors], df['Target_Multi'])
-
-    elif prediction_type == "OU25":
+        model.fit(df[predictors], df['Target'])
+    else:
         predictors += ['B365_O25', 'B365_U25']
-        total_goals = df['FTHG'] + df['FTAG']
-        target = np.where(total_goals > 2.5, 1, 0)
-
+        target = np.where((df['FTHG'] + df['FTAG']) > 2.5, 1, 0)
         model = xgb.XGBClassifier(objective='binary:logistic', **best_params)
         model.fit(df[predictors], target)
 
@@ -190,61 +148,66 @@ def train_model(df, prediction_type="1X2"):
 def calculate_kelly(prob, odds, bankroll, fraction):
     if prob * odds <= 1: return 0.0
     b = odds - 1
-    p = prob
-    q = 1 - p
-    full = (b * p - q) / b
+    full = (b * prob - (1 - prob)) / b
     return bankroll * max(full, 0) * fraction
 
 
-def plot_score_heatmap(home_goal_exp, away_goal_exp):
-    """Rysuje mapę prawdopodobieństwa dokładnych wyników"""
-    max_goals = 5
-    probs = np.zeros((max_goals, max_goals))
+def plot_score_heatmap(home_exp, away_exp):
+    probs = np.zeros((5, 5))
+    for h in range(5):
+        for a in range(5):
+            probs[a, h] = poisson.pmf(h, home_exp) * poisson.pmf(a, away_exp) * 100
 
-    for i in range(max_goals):  # Goście
-        for j in range(max_goals):  # Gospodarze
-            prob = poisson.pmf(j, home_goal_exp) * poisson.pmf(i, away_goal_exp)
-            probs[i, j] = prob * 100
-
-    fig, ax = plt.subplots(figsize=(6, 4))
+    fig, ax = plt.subplots(figsize=(5, 4))
     sns.heatmap(probs, annot=True, fmt=".1f", cmap="YlGnBu", cbar=False, ax=ax)
-    ax.set_xlabel(f"Gole Gospodarza")
-    ax.set_ylabel(f"Gole Gościa")
-    ax.set_title("Prawdopodobieństwo Dokładnego Wyniku (%)")
+    ax.set_xlabel("Gole Gospodarza")
+    ax.set_ylabel("Gole Gościa")
+    ax.set_title("Prawdopodobieństwo Wyniku (%)")
     return fig
+
+
 # --- 2. INTERFEJS ---
 
-st.title("⚽ Advanced AI Predictor 2.0 (Auto-Fixtures)")
+st.title("⚽ Advanced AI Predictor 2.0")
 
-# SIDEBAR - KONFIGURACJA
-# --- 3. PANEL BOCZNY ---
+# --- PANEL BOCZNY ---
 st.sidebar.header("Konfiguracja")
 
-# POBIERANIE DOSTĘPNYCH LIG Z BAZY (DYNAMICZNIE)
-@st.cache_data
-def get_available_leagues():
-    # Pobieramy unikalne nazwy lig z bazy
-    # Używamy st.secrets["DB_URL"] jeśli jesteś w chmurze, lub lokalnego connection stringa
-    # Dla uproszczenia tutaj użyjemy funkcji load_and_prep_data w trybie 'tylko ligi'
-    # Ale najprościej zrobić to "na sztywno" dla wszystkich, które dodaliśmy w ETL:
-    return [
-        "Premier League", "Championship", "League One", "League Two",
-        "La Liga", "La Liga 2",
-        "Bundesliga", "Bundesliga 2",
-        "Serie A", "Serie B",
-        "Ligue 1", "Ligue 2",
-        "Eredivisie", "Liga Portugal", "Jupiler League",
-        "Super Lig", "Scottish Premiership", "Greece Super League"
-    ]
+# Konfiguracja z Backtestu
+league_config = {
+    "Bundesliga": {"roi_1x2": 0.29, "roi_ou": -14.85, "recom": "🟡 MAŁY ZYSK (Ostrożnie)"},
+    "Bundesliga 2": {"roi_1x2": -9.44, "roi_ou": -25.80, "recom": "⛔ UNIKAJ TEJ LIGI"},
+    "Championship": {"roi_1x2": 14.31, "roi_ou": -3.81, "recom": "🔥 GRAJ ZWYCIĘZCĘ (1X2)"},
+    "Eredivisie": {"roi_1x2": 26.59, "roi_ou": -18.47, "recom": "🔥 GRAJ ZWYCIĘZCĘ (1X2)"},
+    "Greece Super League": {"roi_1x2": 38.11, "roi_ou": 20.05, "recom": "🔥 GRAJ WSZYSTKO"},
+    "Jupiler League": {"roi_1x2": -29.22, "roi_ou": 9.95, "recom": "🔥 GRAJ GOLE (O/U)"},
+    "La Liga": {"roi_1x2": 5.95, "roi_ou": 44.56, "recom": "🔥 GRAJ GOLE (O/U)"},
+    "La Liga 2": {"roi_1x2": -14.14, "roi_ou": 9.80, "recom": "🔥 GRAJ GOLE (O/U)"},
+    "League One": {"roi_1x2": 6.36, "roi_ou": -14.27, "recom": "🔥 GRAJ ZWYCIĘZCĘ (1X2)"},
+    "League Two": {"roi_1x2": -15.54, "roi_ou": 11.74, "recom": "🔥 GRAJ GOLE (O/U)"},
+    "Liga Portugal": {"roi_1x2": -18.10, "roi_ou": -0.18, "recom": "⛔ UNIKAJ TEJ LIGI"},
+    "Ligue 1": {"roi_1x2": -43.09, "roi_ou": -9.61, "recom": "⛔ UNIKAJ TEJ LIGI"},
+    "Ligue 2": {"roi_1x2": -36.91, "roi_ou": -28.99, "recom": "⛔ UNIKAJ TEJ LIGI"},
+    "Premier League": {"roi_1x2": -9.73, "roi_ou": -22.39, "recom": "⛔ UNIKAJ TEJ LIGI"},
+    "Scottish Premiership": {"roi_1x2": 34.72, "roi_ou": -9.43, "recom": "🔥 GRAJ ZWYCIĘZCĘ (1X2)"},
+    "Serie A": {"roi_1x2": 49.42, "roi_ou": -15.18, "recom": "🔥 GRAJ ZWYCIĘZCĘ (1X2)"},
+    "Serie B": {"roi_1x2": -20.08, "roi_ou": 13.05, "recom": "🔥 GRAJ GOLE (O/U)"},
+    "Super Lig": {"roi_1x2": -1.37, "roi_ou": 17.20, "recom": "🔥 GRAJ GOLE (O/U)"},
+}
 
-all_leagues = get_available_leagues()
-selected_league = st.sidebar.selectbox("Wybierz Ligę", all_leagues)
+selected_league = st.sidebar.selectbox("Wybierz Ligę", sorted(list(league_config.keys())))
+
+# Wyświetlanie rekomendacji
+cfg = league_config.get(selected_league, {"roi_1x2": 0, "roi_ou": 0, "recom": "?"})
+st.sidebar.info(f"Rekomendacja: {cfg['recom']}")
+c1, c2 = st.sidebar.columns(2)
+c1.metric("ROI 1X2", f"{cfg['roi_1x2']}%")
+c2.metric("ROI O/U", f"{cfg['roi_ou']}%")
 
 st.sidebar.divider()
-st.sidebar.header("Rodzaj Zakładu")
 bet_type = st.sidebar.radio("Tryb", ["Zwycięzca (1X2)", "Gole (Over/Under 2.5)"])
 
-# ŁADOWANIE MODELU
+# ŁADOWANIE
 with st.spinner(f'Analiza: {selected_league}...'):
     raw_data = load_and_prep_data(selected_league)
     if raw_data.empty: st.error("Brak danych."); st.stop()
@@ -253,191 +216,120 @@ with st.spinner(f'Analiza: {selected_league}...'):
     train_mode = "1X2" if bet_type == "Zwycięzca (1X2)" else "OU25"
     model, features = train_model(processed_data, prediction_type=train_mode)
 
-# --- SEKCJA AUTOMATYCZNEGO WYBORU MECZU ---
+# TERMINARZ
 st.sidebar.divider()
-st.sidebar.header("Wybór Meczu")
-
-# 1. Pobieramy terminarz
+st.sidebar.header("Mecz")
 fixtures = get_upcoming_fixtures(selected_league)
-match_options = ["Wybierz ręcznie..."]
+match_opts = ["Wybierz ręcznie..."]
 match_map = {}
-
 if not fixtures.empty:
     for idx, row in fixtures.iterrows():
-        date_str = row['Date'].strftime('%d.%m') if pd.notnull(row['Date']) else "??"
-        label = f"{date_str} | {row['HomeTeam']} vs {row['AwayTeam']}"
-        match_options.append(label)
-        match_map[label] = row
+        lbl = f"{row['Date'].strftime('%d.%m')} | {row['HomeTeam']} vs {row['AwayTeam']}"
+        match_opts.append(lbl)
+        match_map[lbl] = row
 
-selected_fixture = st.sidebar.selectbox("Najbliższe mecze:", match_options)
+sel_fix = st.sidebar.selectbox("Terminarz", match_opts)
 
 # Domyślne wartości
-default_h_idx, default_a_idx = 0, 1
-def_o1, def_ox, def_o2 = 2.0, 3.2, 3.5
-def_oo, def_ou = 1.9, 1.9
+def_h, def_a = 0, 1
+d_o1, d_ox, d_o2 = 2.0, 3.2, 3.5
+d_oo, d_ou = 1.9, 1.9
 
-# Automatyczne uzupełnianie
-if selected_fixture != "Wybierz ręcznie...":
-    m_data = match_map[selected_fixture]
-    teams_list = sorted(raw_data['HomeTeam'].unique())
+if sel_fix != "Wybierz ręcznie...":
+    md = match_map[sel_fix]
+    teams = sorted(raw_data['HomeTeam'].unique())
     try:
-        default_h_idx = teams_list.index(m_data['HomeTeam'])
-        default_a_idx = teams_list.index(m_data['AwayTeam'])
+        def_h = teams.index(md['HomeTeam'])
+        def_a = teams.index(md['AwayTeam'])
+        if pd.notnull(md.get('B365H')): d_o1 = float(md['B365H'])
+        if pd.notnull(md.get('B365D')): d_ox = float(md['B365D'])
+        if pd.notnull(md.get('B365A')): d_o2 = float(md['B365A'])
+        if pd.notnull(md.get('B365>2.5')): d_oo = float(md['B365>2.5'])
+        if pd.notnull(md.get('B365<2.5')): d_ou = float(md['B365<2.5'])
+    except:
+        pass
 
-        if pd.notnull(m_data.get('B365H')): def_o1 = float(m_data['B365H'])
-        if pd.notnull(m_data.get('B365D')): def_ox = float(m_data['B365D'])
-        if pd.notnull(m_data.get('B365A')): def_o2 = float(m_data['B365A'])
-        if pd.notnull(m_data.get('B365>2.5')): def_oo = float(m_data['B365>2.5'])
-        if pd.notnull(m_data.get('B365<2.5')): def_ou = float(m_data['B365<2.5'])
-
-        st.sidebar.success(f"Wczytano kursy dla: {m_data['HomeTeam']}")
-    except ValueError:
-        st.sidebar.warning("Nazwa drużyny w terminarzu różni się od bazy. Wybierz z listy poniżej.")
-
-# Wyświetlanie inputów
 teams = sorted(raw_data['HomeTeam'].unique())
-home_team = st.sidebar.selectbox("Gospodarz", teams, index=default_h_idx)
-away_team = st.sidebar.selectbox("Gość", teams, index=default_a_idx)
+home_team = st.sidebar.selectbox("Gospodarz", teams, index=def_h)
+away_team = st.sidebar.selectbox("Gość", teams, index=def_a)
 
 if bet_type == "Zwycięzca (1X2)":
-    st.sidebar.subheader("Kursy")
-    odds_1 = st.sidebar.number_input("1 (Home)", value=def_o1, step=0.05)
-    odds_x = st.sidebar.number_input("X (Draw)", value=def_ox, step=0.05)
-    odds_2 = st.sidebar.number_input("2 (Away)", value=def_o2, step=0.05)
+    st.sidebar.subheader("Kursy 1X2")
+    o1 = st.sidebar.number_input("1 (Home)", value=d_o1, step=0.05)
+    ox = st.sidebar.number_input("X (Draw)", value=d_ox, step=0.05)
+    o2 = st.sidebar.number_input("2 (Away)", value=d_o2, step=0.05)
 else:
-    st.sidebar.subheader("Kursy")
-    odds_over = st.sidebar.number_input("Over 2.5", value=def_oo, step=0.05)
-    odds_under = st.sidebar.number_input("Under 2.5", value=def_ou, step=0.05)
+    st.sidebar.subheader("Kursy O/U")
+    oo = st.sidebar.number_input("Over 2.5", value=d_oo, step=0.05)
+    ou = st.sidebar.number_input("Under 2.5", value=d_ou, step=0.05)
 
 st.sidebar.divider()
-st.sidebar.header("Kapitał")
 bankroll = st.sidebar.number_input("Budżet", value=1000)
-kelly_fraction = st.sidebar.select_slider("Ryzyko Kelly", options=[0.05, 0.1, 0.2], value=0.1)
+kelly_frac = st.sidebar.select_slider("Kelly", [0.05, 0.1, 0.2], value=0.1)
 
 # --- 3. GŁÓWNA ANALIZA ---
-
 if st.sidebar.button("PRZEANALIZUJ MECZ", type="primary"):
     try:
         h_stats = processed_data[processed_data['HomeTeam'] == home_team].iloc[-1]
         a_stats = processed_data[processed_data['AwayTeam'] == away_team].iloc[-1]
 
-        # Base Input
-        input_dict = {
-            'OddsDiff': [(1 / (odds_1 if bet_type == "Zwycięzca (1X2)" else odds_over)) -
-                         (1 / (odds_2 if bet_type == "Zwycięzca (1X2)" else odds_under))],
-            'Home_Att': [h_stats['Home_Att']], 'Away_Att': [a_stats['Away_Att']],
-            'Home_Def': [h_stats['Home_Def']], 'Away_Def': [a_stats['Away_Def']],
-            'Home_Form': [h_stats['Home_Form']], 'Away_Form': [a_stats['Away_Form']],
-            'Home_Corners_Avg': [h_stats['Home_Corners_Avg']],
-            'Away_Corners_Avg': [a_stats['Away_Corners_Avg']]
-        }
+        input_data = pd.DataFrame([{
+            'OddsDiff': (1 / (o1 if bet_type == "Zwycięzca (1X2)" else oo)) - (
+                        1 / (o2 if bet_type == "Zwycięzca (1X2)" else ou)),
+            'Home_Att': h_stats['Home_Att'], 'Away_Att': a_stats['Away_Att'],
+            'Home_Def': h_stats['Home_Def'], 'Away_Def': a_stats['Away_Def'],
+            'Home_Form': h_stats['Home_Form'], 'Away_Form': a_stats['Away_Form'],
+            'Home_Corners_Avg': h_stats['Home_Corners_Avg'], 'Away_Corners_Avg': a_stats['Away_Corners_Avg']
+        }])
 
         if bet_type == "Zwycięzca (1X2)":
-            input_dict['B365H'] = [odds_1]
-            input_dict['B365A'] = [odds_2]
-            input_dict['B365D'] = [odds_x]
-            input_df = pd.DataFrame(input_dict)
+            input_data['B365H'] = o1
+            input_data['B365D'] = ox
+            input_data['B365A'] = o2
+            probs = model.predict_proba(input_data)[0]
+            outcomes = [("GOSPODARZ (1)", probs[2], o1), ("REMIS (X)", probs[1], ox), ("GOŚĆ (2)", probs[0], o2)]
+        else:
+            input_data['B365_O25'] = oo
+            input_data['B365_U25'] = ou
+            p_over = model.predict_proba(input_data)[0][1]
+            outcomes = [("OVER 2.5", p_over, oo), ("UNDER 2.5", 1 - p_over, ou)]
 
-            # PREDYKCJA MULTICLASS
-            probs = model.predict_proba(input_df)[0]
-            p_away, p_draw, p_home = probs[0], probs[1], probs[2]
-
-            outcomes = [
-                ("GOSPODARZ (1)", p_home, odds_1),
-                ("REMIS (X)", p_draw, odds_x),
-                ("GOŚĆ (2)", p_away, odds_2)
-            ]
-
-        else:  # Over/Under
-            input_dict['B365_O25'] = [odds_over]
-            input_dict['B365_U25'] = [odds_under]
-            input_df = pd.DataFrame(input_dict)
-
-            p_over = model.predict_proba(input_df)[0][1]
-            p_under = 1.0 - p_over
-
-            outcomes = [
-                ("OVER 2.5", p_over, odds_over),
-                ("UNDER 2.5", p_under, odds_under)
-            ]
-
-        # WIZUALIZACJA
-        st.subheader(f"Analiza: {home_team} vs {away_team}")
-
+        st.subheader(f"{home_team} vs {away_team}")
         cols = st.columns(len(outcomes))
 
-        for idx, (label, prob, odd) in enumerate(outcomes):
-            with cols[idx]:
-                st.markdown(f"### {label}")
+        for i, (lbl, prob, odd) in enumerate(outcomes):
+            with cols[i]:
+                fair = 1 / prob if prob > 0 else 0
+                st.metric(lbl, f"{prob * 100:.1f}%", f"Fair: {fair:.2f}", delta_color="off")
+                val = (prob * odd) - 1
+                stake = calculate_kelly(prob, odd, bankroll, kelly_frac)
 
-                # OBLICZAMY KURS FAIR (1 / Prawdopodobieństwo)
-                fair_odd = 1 / prob if prob > 0 else 0
-
-                # ZMIANA: Wyświetlamy % oraz Kurs Fair w nawiasie
-                st.metric(
-                    label="Prawdopodobieństwo (Fair)",
-                    value=f"{prob * 100:.1f}%",
-                    delta=f"@{fair_odd:.2f}",  # To wyświetli kurs na zielono/czerwono pod spodem
-                    delta_color="off"  # Wyłączamy kolorowanie (żeby było szare/neutralne)
-                )
-
-                value = (prob * odd) - 1
-                stake = calculate_kelly(prob, odd, bankroll, kelly_fraction)
-
-                st.divider()  # Linia oddzielająca dla czytelności
-
-                # Wyświetlanie Value i Decyzji
-                if value > 0.05:
-                    st.success(f"📈 VALUE: {value * 100:.1f}%")
-                    st.markdown(f"**Bukmacher płaci: {odd:.2f}**")  # Przypomnienie kursu bukmachera
-                    if stake > 0:
-                        st.markdown(f"💰 Stawka: **{stake:.2f} PLN**")
-                elif value > 0:
-                    st.warning(f"⚠️ Value: {value * 100:.1f}%")
-                    st.markdown(f"Kurs: {odd:.2f}")
+                if val > 0.05:
+                    st.success(f"📈 VALUE: {val * 100:.1f}%")
+                    if stake > 0: st.markdown(f"Stawka: **{stake:.2f} PLN**")
+                elif val > 0:
+                    st.warning(f"Małe Value: {val * 100:.1f}%")
                 else:
-                    st.error(f"Brak Value ({value * 100:.1f}%)")
-                    st.markdown(f"Kurs: {odd:.2f}")
+                    st.error("Brak Value")
+                st.caption(f"Bukmacher: {odd:.2f}")
 
+        # HEATMAPA I xG
         st.divider()
-        st.subheader("Statystyki (Średnia z 5 meczów)")
-        chart_df = pd.DataFrame({
-            'Stat': ['Gole Strzelane', 'Gole Tracone', 'Rożne', 'Punkty (Forma)'],
-            home_team: [h_stats['Home_Att'], h_stats['Home_Def'], h_stats['Home_Corners_Avg'], h_stats['Home_Form']],
-            away_team: [a_stats['Away_Att'], a_stats['Away_Def'], a_stats['Away_Corners_Avg'], a_stats['Away_Form']]
-        }).set_index('Stat')
-        st.bar_chart(chart_df)
-        st.divider()
-        st.subheader("Symulacja Dokładnego Wyniku")
+        xg_h = (h_stats['Home_Att'] + a_stats['Away_Def']) / 2
+        xg_a = (a_stats['Away_Att'] + h_stats['Home_Def']) / 2
 
-        # Obliczamy xG (Oczekiwane Gole) na ten konkretny mecz
-        # Średnia z: Atak Gospodarza vs Obrona Gościa
-        xg_home = (h_stats['Home_Att'] + a_stats['Away_Def']) / 2
-        xg_away = (a_stats['Away_Att'] + h_stats['Home_Def']) / 2
-
-        col_map, col_stat = st.columns([2, 1])
-
-        with col_map:
-            # Rysujemy mapę
-            fig = plot_score_heatmap(xg_home, xg_away)
-            st.pyplot(fig)
-
-        with col_stat:
-            st.info(f"🔢 Przewidywany wynik (xG):")
-            st.markdown(f"## {xg_home:.2f} - {xg_away:.2f}")
-
-            # Szukamy wyniku z największą szansą
-            best_prob = 0
-            best_score = (0, 0)
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.write("Heatmapa Wyników:")
+            st.pyplot(plot_score_heatmap(xg_h, xg_a))
+        with c2:
+            st.info(f"xG: {xg_h:.2f} - {xg_a:.2f}")
+            best_p, best_s = 0, (0, 0)
             for h in range(5):
                 for a in range(5):
-                    p = poisson.pmf(h, xg_home) * poisson.pmf(a, xg_away)
-                    if p > best_prob:
-                        best_prob = p
-                        best_score = (h, a)
+                    p = poisson.pmf(h, xg_h) * poisson.pmf(a, xg_a)
+                    if p > best_p: best_p, best_s = p, (h, a)
+            st.success(f"Typ: {best_s[0]}-{best_s[1]}")
 
-            st.write("Najbardziej realny wynik:")
-            st.success(f"⚽ {best_score[0]} - {best_score[1]}")
-            st.caption(f"Prawdopodobieństwo: {best_prob * 100:.1f}%")
     except Exception as e:
-        st.error(f"Błąd analizy: {e}")
+        st.error(f"Błąd: {e}")
