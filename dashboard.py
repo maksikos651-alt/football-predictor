@@ -14,36 +14,30 @@ st.set_page_config(page_title="AI Football Predictor", layout="wide")
 
 # --- 1. FUNKCJE SILNIKA ---
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=3600)
 def get_upcoming_fixtures(league_name):
     url = "https://www.football-data.co.uk/fixtures.csv"
 
     try:
-        # Wczytujemy
-        df = pd.read_csv(url, encoding='latin1', on_bad_lines='skip')
+        # ZMIANA: 'utf-8-sig' automatycznie usuwa te dziwne znaki (ï»¿) na początku
+        df = pd.read_csv(url, encoding='utf-8-sig', on_bad_lines='skip')
 
         # Czyszczenie nazw kolumn (usuwamy spacje)
         df.columns = df.columns.str.strip()
 
-        # --- DIAGNOSTYKA (Pokaże jakie są kolumny) ---
-        st.warning(f"Dostępne kolumny w pliku: {df.columns.tolist()}")
-        # ---------------------------------------------
-
-        # AUTO-NAPRAWA: Jeśli kolumna nazywa się 'Division', zmień ją na 'Div'
+        # Zabezpieczenie: Jeśli mimo zmiany kodowania nadal jest błąd w nazwie
+        # (np. admin strony zmieni format), szukamy kolumny zawierającej 'Div'
         if 'Div' not in df.columns:
-            # Szukamy czy jest coś podobnego
             for col in df.columns:
-                if 'Div' in col or 'League' in col:  # Np. 'Division' lub 'League'
-                    st.info(f"Naprawiono nazwę kolumny: zmieniono '{col}' na 'Div'")
+                if 'Div' in col:
                     df = df.rename(columns={col: 'Div'})
                     break
 
-        # Jeśli nadal nie ma Div, to jest problem
+        # Jeśli nadal pusto - zwracamy pusty wynik (Dashboard pokaże "Wybierz ręcznie")
         if 'Div' not in df.columns:
-            st.error("Nie znaleziono kolumny 'Div' ani 'Division'.")
             return pd.DataFrame()
 
-        # Reszta logiki bez zmian
+        # Reszta logiki (Mapowanie lig)
         league_map = {
             "Premier League": "E0", "Championship": "E1",
             "La Liga": "SP1", "Bundesliga": "D1",
@@ -51,19 +45,20 @@ def get_upcoming_fixtures(league_name):
         }
         div_code = league_map.get(league_name)
 
+        # Filtrujemy ligę
         league_fixtures = df[df['Div'] == div_code].copy()
 
         # Formatowanie daty
         league_fixtures['Date'] = pd.to_datetime(league_fixtures['Date'], dayfirst=True, errors='coerce')
 
-        # Filtr daty (od dzisiaj)
+        # Filtr daty (od dzisiaj w górę)
         today = pd.Timestamp.now().normalize()
         future_games = league_fixtures[league_fixtures['Date'] >= today]
 
         return future_games.sort_values(['Date', 'Time'])
 
-    except Exception as e:
-        st.error(f"Błąd: {e}")
+    except Exception:
+        # W razie błędu po prostu zwracamy puste dane, bez straszenia użytkownika
         return pd.DataFrame()
 
 
