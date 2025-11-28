@@ -209,11 +209,15 @@ with tab1:
         progress = st.progress(0)
         total_games = len(fixtures)
 
+        # ... (to jest wewnątrz with tab1:) ...
+
         for i, (index, row) in enumerate(fixtures.iterrows()):
+
+            # Pasek postępu
             current_prog = (i + 1) / total_games
             progress.progress(min(current_prog, 1.0))
 
-            # Znajdź statystyki drużyn
+            # Znajdź statystyki
             h_stats = processed_data[processed_data['HomeTeam'] == row['HomeTeam']]
             a_stats = processed_data[processed_data['AwayTeam'] == row['AwayTeam']]
 
@@ -222,7 +226,7 @@ with tab1:
             h_stat = h_stats.iloc[-1]
             a_stat = a_stats.iloc[-1]
 
-            # Przygotuj input
+            # Budujemy bazowy DataFrame
             match_input = pd.DataFrame([{
                 'Home_Att': h_stat['Home_Att'], 'Away_Att': a_stat['Away_Att'],
                 'Home_Def': h_stat['Home_Def'], 'Away_Def': a_stat['Away_Def'],
@@ -230,26 +234,29 @@ with tab1:
                 'Home_Corners_Avg': h_stat['Home_Corners_Avg'], 'Away_Corners_Avg': a_stat['Away_Corners_Avg']
             }])
 
-            # Pobierz kursy z fixtures (jeśli są)
             if bet_type == "Zwycięzca (1X2)":
-                o1 = row.get('B365H', 2.0);
-                ox = row.get('B365D', 3.2);
-                o2 = row.get('B365A', 3.5)
-                # Obsługa braków kursów
-                if pd.isna(o1): continue
+                o1 = row.get('B365H');
+                ox = row.get('B365D');
+                o2 = row.get('B365A')
+                # Zabezpieczenie przed NaN (puste kursy)
+                if pd.isna(o1) or pd.isna(ox) or pd.isna(o2): continue
 
                 match_input['OddsDiff'] = (1 / o1) - (1 / o2)
                 match_input['B365H'] = o1;
                 match_input['B365D'] = ox;
                 match_input['B365A'] = o2
 
-                probs = model.predict_proba(match_input)[0]  # Away, Draw, Home
+                # --- KLUCZOWA POPRAWKA ---
+                # Sortujemy kolumny tak, jak chce tego model!
+                match_input = match_input[features]
+                # -------------------------
 
-                # Sprawdź Value dla każdego wyniku
+                probs = model.predict_proba(match_input)[0]
+
                 for outcome, prob, odd, name in [(2, probs[2], o1, row['HomeTeam']),
                                                  (0, probs[0], o2, row['AwayTeam'])]:
                     val = (prob * odd) - 1
-                    if val > 0.05:  # Minimum 5% Value
+                    if val > 0.05:
                         value_bets.append({
                             "Data": row['Date'].strftime('%d.%m'),
                             "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
@@ -261,18 +268,21 @@ with tab1:
                         })
             else:
                 # O/U
-                oo = row.get('B365>2.5', 1.9);
-                ou = row.get('B365<2.5', 1.9)
-                if pd.isna(oo): continue
+                oo = row.get('B365>2.5');
+                ou = row.get('B365<2.5')
+                if pd.isna(oo) or pd.isna(ou): continue
 
                 match_input['OddsDiff'] = (1 / oo) - (1 / ou)
                 match_input['B365_O25'] = oo;
                 match_input['B365_U25'] = ou
 
+                # --- KLUCZOWA POPRAWKA ---
+                match_input = match_input[features]
+                # -------------------------
+
                 p_over = model.predict_proba(match_input)[0][1]
                 p_under = 1.0 - p_over
 
-                # Sprawdź Over
                 val_o = (p_over * oo) - 1
                 if val_o > 0.05:
                     value_bets.append(
@@ -280,7 +290,6 @@ with tab1:
                          "Typ": "OVER 2.5", "Kurs": oo, "Szansa AI": f"{p_over * 100:.1f}%",
                          "Value": f"{val_o * 100:.1f}%", "Rekomendacja": "🔥 GRAJ" if val_o > 0.1 else "✅ Warto"})
 
-                # Sprawdź Under
                 val_u = (p_under * ou) - 1
                 if val_u > 0.05:
                     value_bets.append(
