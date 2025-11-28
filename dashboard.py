@@ -207,9 +207,11 @@ with tab1:
     else:
         value_bets = []
         progress = st.progress(0)
+        total_games = len(fixtures)
 
-        for idx, row in fixtures.iterrows():
-            progress.progress((idx + 1) / len(fixtures))
+        for i, (index, row) in enumerate(fixtures.iterrows()):
+            current_prog = (i + 1) / total_games
+            progress.progress(min(current_prog, 1.0))
 
             # Znajdź statystyki drużyn
             h_stats = processed_data[processed_data['HomeTeam'] == row['HomeTeam']]
