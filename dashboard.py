@@ -217,9 +217,28 @@ def plot_score_heatmap(home_goal_exp, away_goal_exp):
 st.title("⚽ Advanced AI Predictor 2.0 (Auto-Fixtures)")
 
 # SIDEBAR - KONFIGURACJA
+# --- 3. PANEL BOCZNY ---
 st.sidebar.header("Konfiguracja")
-selected_league = st.sidebar.selectbox("Liga", ["Premier League", "Championship", "La Liga", "Bundesliga", "Serie A",
-                                                "Ligue 1"])
+
+# POBIERANIE DOSTĘPNYCH LIG Z BAZY (DYNAMICZNIE)
+@st.cache_data
+def get_available_leagues():
+    # Pobieramy unikalne nazwy lig z bazy
+    # Używamy st.secrets["DB_URL"] jeśli jesteś w chmurze, lub lokalnego connection stringa
+    # Dla uproszczenia tutaj użyjemy funkcji load_and_prep_data w trybie 'tylko ligi'
+    # Ale najprościej zrobić to "na sztywno" dla wszystkich, które dodaliśmy w ETL:
+    return [
+        "Premier League", "Championship", "League One", "League Two",
+        "La Liga", "La Liga 2",
+        "Bundesliga", "Bundesliga 2",
+        "Serie A", "Serie B",
+        "Ligue 1", "Ligue 2",
+        "Eredivisie", "Liga Portugal", "Jupiler League",
+        "Super Lig", "Scottish Premiership", "Greece Super League"
+    ]
+
+all_leagues = get_available_leagues()
+selected_league = st.sidebar.selectbox("Wybierz Ligę", all_leagues)
 
 st.sidebar.divider()
 st.sidebar.header("Rodzaj Zakładu")
