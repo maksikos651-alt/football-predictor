@@ -413,42 +413,76 @@ with tab2:
 # --- TAB 3: HISTORIA ---
 with tab3:
     st.header("Weryfikacja Modelu")
+    st.markdown("Ostatnie 20 meczów i decyzje, jakie podjąłby model (Value > 10%).")
+
+    # Sortujemy od najnowszych
     history = processed_data.sort_values("Date", ascending=False).head(20).copy()
     rows = []
 
     for idx, row in history.iterrows():
-        # Rekonstrukcja
-        # Tworzymy wiersz z istniejących cech w DF
+        # Rekonstrukcja cech do modelu
         input_dict = {col: row[col] for col in features if col in row}
-        # Dodajemy OddsDiff (bo to cecha obliczana w locie przy predykcji live)
+
+        # Jeśli brakuje OddsDiff (bo to cecha liczona dynamicznie), dodajemy ją
         if 'OddsDiff' not in input_dict:
             input_dict['OddsDiff'] = (1 / row['B365H']) - (1 / row['B365A'])
 
         clean_input = pd.DataFrame([input_dict])
-        clean_input = clean_input[features]  # Sort
+        clean_input = clean_input[features]  # Sortowanie kolumn zgodnie z modelem
 
-        pick = "-"
-        res = "⚪"
+        pick = "-"  # Co wybrał model
+        res = "⚪"  # Czy weszło (kolor)
+        played_odd = 0.0  # Po jakim kursie
 
         if bet_type == "Zwycięzca (1X2)":
             probs = model.predict_proba(clean_input)[0]
+
+            # Sprawdzamy Home
             if (probs[2] * row['B365H']) - 1 > 0.1:
-                pick = "HOME";
+                pick = "HOME"
+                played_odd = row['B365H']
                 res = "🟢 WIN" if row['FTR'] == 'H' else "🔴 LOSS"
+
+            # Sprawdzamy Away
             elif (probs[0] * row['B365A']) - 1 > 0.1:
-                pick = "AWAY";
+                pick = "AWAY"
+                played_odd = row['B365A']
                 res = "🟢 WIN" if row['FTR'] == 'A' else "🔴 LOSS"
-        else:
+
+            # Sprawdzamy Draw (opcjonalnie, jeśli model widzi value w remisie)
+            elif (probs[1] * row['B365D']) - 1 > 0.1:
+                pick = "DRAW"
+                played_odd = row['B365D']
+                res = "🟢 WIN" if row['FTR'] == 'D' else "🔴 LOSS"
+
+        else:  # Over/Under
             p_over = model.predict_proba(clean_input)[0][1]
+            p_under = 1.0 - p_over
+
+            total_goals = row['FTHG'] + row['FTAG']
+
+            # Sprawdzamy Over
             if (p_over * row['B365_O25']) - 1 > 0.1:
-                pick = "OVER";
-                res = "🟢 WIN" if (row['FTHG'] + row['FTAG']) > 2.5 else "🔴 LOSS"
-            elif ((1 - p_over) * row['B365_U25']) - 1 > 0.1:
-                pick = "UNDER";
-                res = "🟢 WIN" if (row['FTHG'] + row['FTAG']) < 2.5 else "🔴 LOSS"
+                pick = "OVER"
+                played_odd = row['B365_O25']
+                res = "🟢 WIN" if total_goals > 2.5 else "🔴 LOSS"
 
-        rows.append(
-            {"Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}", "Wynik": f"{int(row['FTHG'])}-{int(row['FTAG'])}",
-             "AI": pick, "Status": res})
+            # Sprawdzamy Under
+            elif (p_under * row['B365_U25']) - 1 > 0.1:
+                pick = "UNDER"
+                played_odd = row['B365_U25']
+                res = "🟢 WIN" if total_goals < 2.5 else "🔴 LOSS"
 
-    st.dataframe(pd.DataFrame(rows))
+        # Formatowanie kursu do wyświetlenia
+        odd_display = f"{played_odd:.2f}" if pick != "-" else "-"
+
+        rows.append({
+            "Data": row['Date'].strftime('%d.%m'),
+            "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
+            "Wynik": f"{int(row['FTHG'])}-{int(row['FTAG'])}",
+            "Typ AI": pick,
+            "Kurs": odd_display,  # <--- Tego brakowało!
+            "Rozliczenie": res
+        })
+
+    st.dataframe(pd.DataFrame(rows), use_container_width=True)
