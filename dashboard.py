@@ -39,9 +39,24 @@ def get_upcoming_fixtures(league_name):
 
         # Reszta logiki (Mapowanie lig)
         league_map = {
-            "Premier League": "E0", "Championship": "E1",
-            "La Liga": "SP1", "Bundesliga": "D1",
-            "Serie A": "I1", "Ligue 1": "F1"
+            "Premier League": "E0",
+            "Championship": "E1",
+            "League One": "E2",
+            "League Two": "E3",
+            "Bundesliga": "D1",
+            "Bundesliga 2": "D2",
+            "Serie A": "I1",
+            "Serie B": "I2",
+            "La Liga": "SP1",
+            "La Liga 2": "SP2",
+            "Ligue 1": "F1",
+            "Ligue 2": "F2",
+            "Eredivisie": "N1",
+            "Jupiler League": "B1",
+            "Liga Portugal": "P1",
+            "Super Lig": "T1",
+            "Greece Super League": "G1",
+            "Scottish Premiership": "SC0"
         }
         div_code = league_map.get(league_name)
 
