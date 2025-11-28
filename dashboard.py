@@ -54,7 +54,6 @@ def get_upcoming_fixtures(league_name):
     except Exception:
         return pd.DataFrame()
 
-
 @st.cache_data(ttl=3600)
 def load_and_prep_data(league_name):
     # HYBRYDOWE POŁĄCZENIE (Działa lokalnie i w chmurze)
