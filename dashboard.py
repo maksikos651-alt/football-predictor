@@ -8,7 +8,7 @@ import seaborn as sns
 from scipy.stats import poisson
 
 # --- KONFIGURACJA STRONY ---
-st.set_page_config(page_title="AI Football Sniper", layout="wide", page_icon="⚽")
+st.set_page_config(page_title="AI Football Sniper Ultimate", layout="wide", page_icon="⚽")
 
 
 # --- 1. FUNKCJE SILNIKA (Backend) ---
@@ -17,9 +17,11 @@ st.set_page_config(page_title="AI Football Sniper", layout="wide", page_icon="�
 def get_upcoming_fixtures(league_name):
     url = "https://www.football-data.co.uk/fixtures.csv"
     try:
+        # Kodowanie utf-8-sig usuwa BOM
         df = pd.read_csv(url, encoding='utf-8-sig', on_bad_lines='skip')
         df.columns = df.columns.str.strip()
 
+        # Auto-naprawa nazwy kolumny Div
         if 'Div' not in df.columns:
             for col in df.columns:
                 if 'Div' in col or 'Division' in col:
@@ -47,69 +49,105 @@ def get_upcoming_fixtures(league_name):
 
 @st.cache_data(ttl=3600)
 def load_and_prep_data(league_name):
-    # BEZPIECZNE POŁĄCZENIE
-    # Kod szuka zmiennej "DB_URL" w sekretach.
-    # Lokalnie: bierze z pliku .streamlit/secrets.toml
-    # W Chmurze: bierze z ustawień Advanced Settings
-
+    # --- BEZPIECZNE POŁĄCZENIE ---
     try:
+        # Streamlit sam znajdzie plik secrets.toml (lokalnie) lub Secrets (w chmurze)
         db_url = st.secrets["DB_URL"]
-    except FileNotFoundError:
-        st.error("❌ Błąd konfiguracji: Nie znaleziono sekretów bazy danych!")
+        engine = create_engine(db_url)
+    except Exception as e:
+        st.error("❌ Błąd: Nie znaleziono sekretów bazy danych!")
+        st.info("Upewnij się, że masz plik .streamlit/secrets.toml (lokalnie) lub skonfigurowane Secrets (w chmurze).")
         st.stop()
-
-    engine = create_engine(db_url)
 
     query = f"SELECT * FROM matches WHERE league = '{league_name}' ORDER BY date ASC"
     df = pd.read_sql(query, engine)
 
+    # Mapowanie nazw kolumn z bazy na nazwy używane w kodzie (skróty)
     df = df.rename(columns={
         'date': 'Date', 'home_team': 'HomeTeam', 'away_team': 'AwayTeam',
         'home_goals': 'FTHG', 'away_goals': 'FTAG', 'result': 'FTR',
         'odds_home': 'B365H', 'odds_draw': 'B365D', 'odds_away': 'B365A',
         'odds_over25': 'B365_O25', 'odds_under25': 'B365_U25',
-        'home_corners': 'HC', 'away_corners': 'AC'
+        'home_corners': 'HC', 'away_corners': 'AC',
+        'home_shots': 'HS', 'away_shots': 'AS',
+        'home_yellow': 'HY', 'away_yellow': 'AY',
+        'home_fouls': 'HF', 'away_fouls': 'AF'
     })
     return df
 
 
 def add_rolling_features(df, window=5):
     data = df.copy()
-    home_df = data[['Date', 'HomeTeam', 'FTHG', 'FTAG', 'FTR', 'HC', 'AC']].rename(
-        columns={'HomeTeam': 'Team', 'FTHG': 'GS', 'FTAG': 'GC', 'HC': 'CorW', 'AC': 'CorL'})
+
+    # Uzupełnianie zerami brakujących kolumn (dla starszych danych)
+    for col in ['HS', 'AS', 'HY', 'AY', 'HF', 'AF']:
+        if col not in data.columns: data[col] = 0
+
+    # 1. Home Stats
+    home_df = data[['Date', 'HomeTeam', 'FTHG', 'FTAG', 'FTR', 'HC', 'AC', 'HS', 'AS', 'HY', 'HF']].rename(
+        columns={'HomeTeam': 'Team', 'FTHG': 'GS', 'FTAG': 'GC',
+                 'HC': 'CorW', 'AC': 'CorL',
+                 'HS': 'ShotsW', 'AS': 'ShotsL',
+                 'HY': 'Cards', 'HF': 'Fouls'}
+    )
     home_df['Pts'] = np.where(home_df['FTR'] == 'H', 3, np.where(home_df['FTR'] == 'D', 1, 0))
     home_df['IsHome'] = 1
 
-    away_df = data[['Date', 'AwayTeam', 'FTAG', 'FTHG', 'FTR', 'AC', 'HC']].rename(
-        columns={'AwayTeam': 'Team', 'FTAG': 'GS', 'FTHG': 'GC', 'AC': 'CorW', 'HC': 'CorL'})
+    # 2. Away Stats
+    away_df = data[['Date', 'AwayTeam', 'FTAG', 'FTHG', 'FTR', 'AC', 'HC', 'AS', 'HS', 'AY', 'AF']].rename(
+        columns={'AwayTeam': 'Team', 'FTAG': 'GS', 'FTHG': 'GC',
+                 'AC': 'CorW', 'HC': 'CorL',
+                 'AS': 'ShotsW', 'HS': 'ShotsL',
+                 'AY': 'Cards', 'AF': 'Fouls'}
+    )
     away_df['Pts'] = np.where(away_df['FTR'] == 'A', 3, np.where(away_df['FTR'] == 'D', 1, 0))
     away_df['IsHome'] = 0
 
+    # 3. Rolling
     team_stats = pd.concat([home_df, away_df]).sort_values('Date')
-    features = team_stats.groupby('Team')[['GS', 'GC', 'Pts', 'CorW']].transform(
+
+    features = team_stats.groupby('Team')[['GS', 'GC', 'Pts', 'CorW', 'ShotsW', 'Cards', 'Fouls']].transform(
         lambda x: x.rolling(window, min_periods=3).mean().shift(1)
     )
-    team_stats[['Form_Att', 'Form_Def', 'Form_Pts', 'Form_Cor']] = features
 
-    h_stats = team_stats[team_stats['IsHome'] == 1][
-        ['Date', 'Team', 'Form_Att', 'Form_Def', 'Form_Pts', 'Form_Cor']].rename(
-        columns={'Team': 'HomeTeam', 'Form_Att': 'Home_Att', 'Form_Def': 'Home_Def', 'Form_Pts': 'Home_Form',
-                 'Form_Cor': 'Home_Corners_Avg'})
-    a_stats = team_stats[team_stats['IsHome'] == 0][
-        ['Date', 'Team', 'Form_Att', 'Form_Def', 'Form_Pts', 'Form_Cor']].rename(
-        columns={'Team': 'AwayTeam', 'Form_Att': 'Away_Att', 'Form_Def': 'Away_Def', 'Form_Pts': 'Away_Form',
-                 'Form_Cor': 'Away_Corners_Avg'})
+    team_stats[['Form_Att', 'Form_Def', 'Form_Pts', 'Form_Cor', 'Form_Shots', 'Form_Cards', 'Form_Fouls']] = features
+
+    # 4. Merge
+    cols_to_keep = ['Date', 'Team', 'Form_Att', 'Form_Def', 'Form_Pts', 'Form_Cor', 'Form_Shots', 'Form_Cards',
+                    'Form_Fouls']
+
+    h_stats = team_stats[team_stats['IsHome'] == 1][cols_to_keep].rename(
+        columns={'Team': 'HomeTeam',
+                 'Form_Att': 'Home_Att', 'Form_Def': 'Home_Def',
+                 'Form_Pts': 'Home_Form', 'Form_Cor': 'Home_Corners_Avg',
+                 'Form_Shots': 'Home_Shots_Avg', 'Form_Cards': 'Home_Cards_Avg', 'Form_Fouls': 'Home_Fouls_Avg'})
+
+    a_stats = team_stats[team_stats['IsHome'] == 0][cols_to_keep].rename(
+        columns={'Team': 'AwayTeam',
+                 'Form_Att': 'Away_Att', 'Form_Def': 'Away_Def',
+                 'Form_Pts': 'Away_Form', 'Form_Cor': 'Away_Corners_Avg',
+                 'Form_Shots': 'Away_Shots_Avg', 'Form_Cards': 'Away_Cards_Avg', 'Form_Fouls': 'Away_Fouls_Avg'})
 
     data = pd.merge(data, h_stats, on=['Date', 'HomeTeam'], how='left')
     data = pd.merge(data, a_stats, on=['Date', 'AwayTeam'], how='left')
     data['OddsDiff'] = (1 / data['B365H']) - (1 / data['B365A'])
+
     return data.dropna()
 
 
 @st.cache_resource
 def train_model(df, prediction_type="1X2"):
-    predictors = ['OddsDiff', 'Home_Att', 'Away_Att', 'Home_Def', 'Away_Def', 'Home_Form', 'Away_Form',
-                  'Home_Corners_Avg', 'Away_Corners_Avg']
+    predictors = [
+        'OddsDiff',
+        'Home_Att', 'Away_Att',
+        'Home_Def', 'Away_Def',
+        'Home_Form', 'Away_Form',
+        'Home_Corners_Avg', 'Away_Corners_Avg',
+        'Home_Shots_Avg', 'Away_Shots_Avg',
+        'Home_Cards_Avg', 'Away_Cards_Avg',
+        'Home_Fouls_Avg', 'Away_Fouls_Avg'
+    ]
+
     best_params = {'n_estimators': 300, 'learning_rate': 0.01, 'max_depth': 4, 'subsample': 0.7,
                    'colsample_bytree': 0.8, 'n_jobs': -1}
 
@@ -147,10 +185,10 @@ def plot_score_heatmap(home_exp, away_exp):
 
 # --- 2. INTERFEJS GŁÓWNY ---
 
-st.title("⚽ AI Football Sniper")
+st.title("⚽ AI Football Sniper Ultimate")
 
-# --- PANEL BOCZNY (KONFIGURACJA) ---
-st.sidebar.header("Ustawienia Systemu")
+# --- PANEL BOCZNY ---
+st.sidebar.header("Ustawienia")
 
 league_config = {
     "Bundesliga": {"roi_1x2": 0.29, "roi_ou": -14.85, "recom": "🟡 MAŁY ZYSK (Ostrożnie)"},
@@ -178,7 +216,6 @@ bet_type = st.sidebar.radio("Strategia", ["Zwycięzca (1X2)", "Gole (Over/Under 
 bankroll = st.sidebar.number_input("Bankroll (PLN)", 1000)
 kelly_frac = st.sidebar.slider("Kelly %", 0.05, 0.2, 0.1)
 
-# Status ligi
 cfg = league_config.get(selected_league, {"roi_1x2": 0, "roi_ou": 0, "recom": "?"})
 st.sidebar.info(f"{cfg['recom']}")
 c1, c2 = st.sidebar.columns(2)
@@ -194,123 +231,94 @@ with st.spinner("Ładowanie AI..."):
     model, features = train_model(processed_data, train_mode)
 
 # --- ZAKŁADKI ---
-tab1, tab2, tab3 = st.tabs(["🔥 Skaner Value", "🔍 Analiza Meczu", "📜 Historia i Weryfikacja"])
+tab1, tab2, tab3 = st.tabs(["🔥 Skaner Value", "🔍 Analiza Meczu", "📜 Historia"])
 
-# --- TAB 1: SKANER VALUE (AUTOMATYCZNY) ---
+# --- TAB 1: SKANER ---
 with tab1:
-    st.header(f"Skaner Okazji: {selected_league}")
-
+    st.header(f"Skaner: {selected_league}")
     fixtures = get_upcoming_fixtures(selected_league)
 
     if fixtures.empty:
-        st.info("Brak nadchodzących meczów w pliku fixtures.csv. Sprawdź w piątek!")
+        st.info("Brak meczów. Sprawdź w piątek!")
     else:
         value_bets = []
         progress = st.progress(0)
         total_games = len(fixtures)
 
-        # ... (to jest wewnątrz with tab1:) ...
-
+        # Pętla z enumerate (naprawiony błąd progress bar)
         for i, (index, row) in enumerate(fixtures.iterrows()):
+            progress.progress(min((i + 1) / total_games, 1.0))
 
-            # Pasek postępu
-            current_prog = (i + 1) / total_games
-            progress.progress(min(current_prog, 1.0))
-
-            # Znajdź statystyki
             h_stats = processed_data[processed_data['HomeTeam'] == row['HomeTeam']]
             a_stats = processed_data[processed_data['AwayTeam'] == row['AwayTeam']]
-
             if h_stats.empty or a_stats.empty: continue
 
             h_stat = h_stats.iloc[-1]
             a_stat = a_stats.iloc[-1]
 
-            # Budujemy bazowy DataFrame
+            # INPUT Z PEŁNYMI STATYSTYKAMI
             match_input = pd.DataFrame([{
                 'Home_Att': h_stat['Home_Att'], 'Away_Att': a_stat['Away_Att'],
                 'Home_Def': h_stat['Home_Def'], 'Away_Def': a_stat['Away_Def'],
                 'Home_Form': h_stat['Home_Form'], 'Away_Form': a_stat['Away_Form'],
-                'Home_Corners_Avg': h_stat['Home_Corners_Avg'], 'Away_Corners_Avg': a_stat['Away_Corners_Avg']
+                'Home_Corners_Avg': h_stat['Home_Corners_Avg'], 'Away_Corners_Avg': a_stat['Away_Corners_Avg'],
+                'Home_Shots_Avg': h_stat['Home_Shots_Avg'], 'Away_Shots_Avg': a_stat['Away_Shots_Avg'],
+                'Home_Cards_Avg': h_stat['Home_Cards_Avg'], 'Away_Cards_Avg': a_stat['Away_Cards_Avg'],
+                'Home_Fouls_Avg': h_stat['Home_Fouls_Avg'], 'Away_Fouls_Avg': a_stat['Away_Fouls_Avg']
             }])
 
             if bet_type == "Zwycięzca (1X2)":
                 o1 = row.get('B365H');
                 ox = row.get('B365D');
                 o2 = row.get('B365A')
-                # Zabezpieczenie przed NaN (puste kursy)
                 if pd.isna(o1) or pd.isna(ox) or pd.isna(o2): continue
 
                 match_input['OddsDiff'] = (1 / o1) - (1 / o2)
                 match_input['B365H'] = o1;
                 match_input['B365D'] = ox;
                 match_input['B365A'] = o2
-
-                # --- KLUCZOWA POPRAWKA ---
-                # Sortujemy kolumny tak, jak chce tego model!
-                match_input = match_input[features]
-                # -------------------------
+                match_input = match_input[features]  # Naprawa kolejności kolumn
 
                 probs = model.predict_proba(match_input)[0]
-
                 for outcome, prob, odd, name in [(2, probs[2], o1, row['HomeTeam']),
                                                  (0, probs[0], o2, row['AwayTeam'])]:
                     val = (prob * odd) - 1
                     if val > 0.05:
-                        value_bets.append({
-                            "Data": row['Date'].strftime('%d.%m'),
-                            "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
-                            "Typ": name,
-                            "Kurs": odd,
-                            "Szansa AI": f"{prob * 100:.1f}%",
-                            "Value": f"{val * 100:.1f}%",
-                            "Rekomendacja": "🔥 GRAJ" if val > 0.1 else "✅ Warto"
-                        })
+                        value_bets.append(
+                            {"Data": row['Date'].strftime('%d.%m'), "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
+                             "Typ": name, "Kurs": odd, "Szansa AI": f"{prob * 100:.1f}%", "Value": f"{val * 100:.1f}%",
+                             "Rekomendacja": "🔥 GRAJ"})
             else:
-                # O/U
                 oo = row.get('B365>2.5');
                 ou = row.get('B365<2.5')
                 if pd.isna(oo) or pd.isna(ou): continue
-
                 match_input['OddsDiff'] = (1 / oo) - (1 / ou)
                 match_input['B365_O25'] = oo;
                 match_input['B365_U25'] = ou
-
-                # --- KLUCZOWA POPRAWKA ---
-                match_input = match_input[features]
-                # -------------------------
+                match_input = match_input[features]  # Naprawa kolejności kolumn
 
                 p_over = model.predict_proba(match_input)[0][1]
                 p_under = 1.0 - p_over
 
                 val_o = (p_over * oo) - 1
-                if val_o > 0.05:
-                    value_bets.append(
-                        {"Data": row['Date'].strftime('%d.%m'), "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
-                         "Typ": "OVER 2.5", "Kurs": oo, "Szansa AI": f"{p_over * 100:.1f}%",
-                         "Value": f"{val_o * 100:.1f}%", "Rekomendacja": "🔥 GRAJ" if val_o > 0.1 else "✅ Warto"})
-
+                if val_o > 0.05: value_bets.append(
+                    {"Data": row['Date'].strftime('%d.%m'), "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
+                     "Typ": "OVER 2.5", "Kurs": oo, "Szansa AI": f"{p_over * 100:.1f}%", "Value": f"{val_o * 100:.1f}%",
+                     "Rekomendacja": "🔥 GRAJ"})
                 val_u = (p_under * ou) - 1
-                if val_u > 0.05:
-                    value_bets.append(
-                        {"Data": row['Date'].strftime('%d.%m'), "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
-                         "Typ": "UNDER 2.5", "Kurs": ou, "Szansa AI": f"{p_under * 100:.1f}%",
-                         "Value": f"{val_u * 100:.1f}%", "Rekomendacja": "🔥 GRAJ" if val_u > 0.1 else "✅ Warto"})
+                if val_u > 0.05: value_bets.append(
+                    {"Data": row['Date'].strftime('%d.%m'), "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
+                     "Typ": "UNDER 2.5", "Kurs": ou, "Szansa AI": f"{p_under * 100:.1f}%",
+                     "Value": f"{val_u * 100:.1f}%", "Rekomendacja": "🔥 GRAJ"})
 
         progress.empty()
-
         if value_bets:
-            st.success(f"Znaleziono {len(value_bets)} okazji w lidze {selected_league}!")
-            df_bets = pd.DataFrame(value_bets)
-            st.dataframe(df_bets, use_container_width=True)
+            st.dataframe(pd.DataFrame(value_bets), use_container_width=True)
         else:
-            st.warning("Brak wyraźnego Value w nadchodzących meczach tej ligi.")
+            st.warning("Brak Value > 5%")
 
-# --- TAB 2: ANALIZA SZCZEGÓŁOWA (STARA WERSJA) ---
+# --- TAB 2: ANALIZA MANUALNA ---
 with tab2:
-    st.header("Analiza Manualna")
-
-    # Wybór meczu
     match_opts = ["Wybierz ręcznie..."]
     match_map = {}
     if not fixtures.empty:
@@ -319,9 +327,7 @@ with tab2:
             match_opts.append(lbl)
             match_map[lbl] = row
 
-    sel_fix = st.selectbox("Wybierz mecz z terminarza", match_opts)
-
-    # Domyślne wartości
+    sel_fix = st.selectbox("Terminarz", match_opts)
     def_h, def_a = 0, 1
     d_o1, d_ox, d_o2 = 2.0, 3.2, 3.5
     d_oo, d_ou = 1.9, 1.9
@@ -330,7 +336,7 @@ with tab2:
         md = match_map[sel_fix]
         teams = sorted(raw_data['HomeTeam'].unique())
         try:
-            def_h = teams.index(md['HomeTeam'])
+            def_h = teams.index(md['HomeTeam']);
             def_a = teams.index(md['AwayTeam'])
             if pd.notnull(md.get('B365H')): d_o1 = float(md['B365H'])
             if pd.notnull(md.get('B365D')): d_ox = float(md['B365D'])
@@ -340,38 +346,33 @@ with tab2:
         except:
             pass
 
-    col_t1, col_t2 = st.columns(2)
+    c1, c2 = st.columns(2)
     teams = sorted(raw_data['HomeTeam'].unique())
-    with col_t1:
-        home_team = st.selectbox("Gospodarz", teams, index=def_h)
-    with col_t2:
-        away_team = st.selectbox("Gość", teams, index=def_a)
+    home_team = c1.selectbox("Gospodarz", teams, index=def_h)
+    away_team = c2.selectbox("Gość", teams, index=def_a)
 
-    col_k1, col_k2, col_k3 = st.columns(3)
+    k1, k2, k3 = st.columns(3)
     if bet_type == "Zwycięzca (1X2)":
-        with col_k1:
-            o1 = st.number_input("1 (Home)", value=d_o1, step=0.05)
-        with col_k2:
-            ox = st.number_input("X (Draw)", value=d_ox, step=0.05)
-        with col_k3:
-            o2 = st.number_input("2 (Away)", value=d_o2, step=0.05)
+        o1 = k1.number_input("1", d_o1);
+        ox = k2.number_input("X", d_ox);
+        o2 = k3.number_input("2", d_o2)
     else:
-        with col_k1:
-            oo = st.number_input("Over 2.5", value=d_oo, step=0.05)
-        with col_k2:
-            ou = st.number_input("Under 2.5", value=d_ou, step=0.05)
-        o1, o2, ox = 0, 0, 0  # Dummy
+        oo = k1.number_input("Over", d_oo);
+        ou = k2.number_input("Under", d_ou)
+        o1, o2, ox = 0, 0, 0
 
-    if st.button("PRZEANALIZUJ TEN MECZ", type="primary"):
-        h_stats = processed_data[processed_data['HomeTeam'] == home_team].iloc[-1]
-        a_stats = processed_data[processed_data['AwayTeam'] == away_team].iloc[-1]
+    if st.button("ANALIZA", type="primary"):
+        h_stat = processed_data[processed_data['HomeTeam'] == home_team].iloc[-1]
+        a_stat = processed_data[processed_data['AwayTeam'] == away_team].iloc[-1]
 
-        # Tworzymy Input
         input_data = pd.DataFrame([{
-            'Home_Att': h_stats['Home_Att'], 'Away_Att': a_stats['Away_Att'],
-            'Home_Def': h_stats['Home_Def'], 'Away_Def': a_stats['Away_Def'],
-            'Home_Form': h_stats['Home_Form'], 'Away_Form': a_stats['Away_Form'],
-            'Home_Corners_Avg': h_stats['Home_Corners_Avg'], 'Away_Corners_Avg': a_stats['Away_Corners_Avg']
+            'Home_Att': h_stat['Home_Att'], 'Away_Att': a_stat['Away_Att'],
+            'Home_Def': h_stat['Home_Def'], 'Away_Def': a_stat['Away_Def'],
+            'Home_Form': h_stat['Home_Form'], 'Away_Form': a_stat['Away_Form'],
+            'Home_Corners_Avg': h_stat['Home_Corners_Avg'], 'Away_Corners_Avg': a_stat['Away_Corners_Avg'],
+            'Home_Shots_Avg': h_stat['Home_Shots_Avg'], 'Away_Shots_Avg': a_stat['Away_Shots_Avg'],
+            'Home_Cards_Avg': h_stat['Home_Cards_Avg'], 'Away_Cards_Avg': a_stat['Away_Cards_Avg'],
+            'Home_Fouls_Avg': h_stat['Home_Fouls_Avg'], 'Away_Fouls_Avg': a_stat['Away_Fouls_Avg']
         }])
 
         if bet_type == "Zwycięzca (1X2)":
@@ -379,108 +380,70 @@ with tab2:
             input_data['B365H'] = o1;
             input_data['B365D'] = ox;
             input_data['B365A'] = o2
-
-            # --- NAPRAWA BŁĘDU (Sortowanie kolumn) ---
-            input_data = input_data[features]
-            # -----------------------------------------
-
+            input_data = input_data[features]  # Sort
             probs = model.predict_proba(input_data)[0]
-            outcomes = [("GOSPODARZ", probs[2], o1), ("REMIS", probs[1], ox), ("GOŚĆ", probs[0], o2)]
+            outcomes = [("1", probs[2], o1), ("X", probs[1], ox), ("2", probs[0], o2)]
         else:
             input_data['OddsDiff'] = (1 / oo) - (1 / ou)
             input_data['B365_O25'] = oo;
             input_data['B365_U25'] = ou
-
-            # --- NAPRAWA BŁĘDU (Sortowanie kolumn) ---
-            input_data = input_data[features]
-            # -----------------------------------------
-
+            input_data = input_data[features]  # Sort
             p_over = model.predict_proba(input_data)[0][1]
-            outcomes = [("OVER 2.5", p_over, oo), ("UNDER 2.5", 1 - p_over, ou)]
+            outcomes = [("Over", p_over, oo), ("Under", 1 - p_over, ou)]
 
-        # Wyświetlanie wyników
-        c_res = st.columns(len(outcomes))
+        cols = st.columns(len(outcomes))
         for i, (lbl, p, o) in enumerate(outcomes):
-            with c_res[i]:
+            with cols[i]:
                 val = (p * o) - 1
-                st.metric(lbl, f"{p * 100:.1f}%", f"Value: {val * 100:.1f}%",
-                          delta_color="normal" if val > 0 else "off")
-                if val > 0.05:
-                    stake = calculate_kelly(p, o, bankroll, kelly_frac)
-                    st.success(f"Graj za: {stake:.2f} zł")
+                st.metric(lbl, f"{p * 100:.1f}%", f"Val: {val * 100:.1f}%", delta_color="normal" if val > 0 else "off")
+                if val > 0.05: st.success(f"Stawka: {calculate_kelly(p, o, bankroll, kelly_frac):.2f}")
 
         st.divider()
-        xg_h = (h_stats['Home_Att'] + a_stats['Away_Def']) / 2
-        xg_a = (a_stats['Away_Att'] + h_stats['Home_Def']) / 2
-        st.write("Heatmapa Wyników:")
-        st.pyplot(plot_score_heatmap(xg_h, xg_a))
+        xg_h = (h_stat['Home_Att'] + a_stat['Away_Def']) / 2
+        xg_a = (a_stat['Away_Att'] + h_stat['Home_Def']) / 2
+        c1, c2 = st.columns([2, 1])
+        c1.pyplot(plot_score_heatmap(xg_h, xg_a))
+        c2.info(f"xG: {xg_h:.2f} - {xg_a:.2f}")
 
-# --- TAB 3: HISTORIA I WERYFIKACJA ---
+# --- TAB 3: HISTORIA ---
 with tab3:
-    st.header(f"Ostatnie mecze: {selected_league}")
-    st.markdown("Sprawdź, jak model poradził sobie w ostatnich 20 meczach.")
+    st.header("Weryfikacja Modelu")
+    history = processed_data.sort_values("Date", ascending=False).head(20).copy()
+    rows = []
 
-    # Bierzemy ostatnie 20 meczów z bazy (te które mają wynik FTR)
-    history_data = processed_data.sort_values("Date", ascending=False).head(20).copy()
+    for idx, row in history.iterrows():
+        # Rekonstrukcja
+        # Tworzymy wiersz z istniejących cech w DF
+        input_dict = {col: row[col] for col in features if col in row}
+        # Dodajemy OddsDiff (bo to cecha obliczana w locie przy predykcji live)
+        if 'OddsDiff' not in input_dict:
+            input_dict['OddsDiff'] = (1 / row['B365H']) - (1 / row['B365A'])
 
-    history_rows = []
+        clean_input = pd.DataFrame([input_dict])
+        clean_input = clean_input[features]  # Sort
 
-    for idx, row in history_data.iterrows():
-        # Rekonstrukcja predykcji
-        input_row = pd.DataFrame([row[features]])  # Features są już w df
-        input_row['OddsDiff'] = (1 / row['B365H']) - (1 / row['B365A'])  # Refresh
+        pick = "-"
+        res = "⚪"
 
-        # Odtwarzamy kursy (muszą być w input)
         if bet_type == "Zwycięzca (1X2)":
-            input_row['B365H'] = row['B365H']
-            input_row['B365D'] = row['B365D']
-            input_row['B365A'] = row['B365A']
-
-            probs = model.predict_proba(input_row)[0]
-            # Sprawdzamy co by obstawił (największe Value)
-            outcomes = [(2, probs[2], row['B365H'], 'H'), (0, probs[0], row['B365A'], 'A')]
-            best_val = 0
-            pick = "Brak"
-            result_color = "⚪"
-
-            for target, p, o, lbl in outcomes:
-                val = (p * o) - 1
-                if val > 0.1:  # Value > 10%
-                    best_val = val
-                    pick = f"{lbl} (@{o})"
-                    # Czy weszło?
-                    if row['FTR'] == lbl:
-                        result_color = "🟢 WIN"
-                    else:
-                        result_color = "🔴 LOSS"
+            probs = model.predict_proba(clean_input)[0]
+            if (probs[2] * row['B365H']) - 1 > 0.1:
+                pick = "HOME";
+                res = "🟢" if row['FTR'] == 'H' else "🔴"
+            elif (probs[0] * row['B365A']) - 1 > 0.1:
+                pick = "AWAY";
+                res = "🟢" if row['FTR'] == 'A' else "🔴"
         else:
-            # O/U
-            input_row['B365_O25'] = row['B365_O25']
-            input_row['B365_U25'] = row['B365_U25']
-            p_over = model.predict_proba(input_row)[0][1]
+            p_over = model.predict_proba(clean_input)[0][1]
+            if (p_over * row['B365_O25']) - 1 > 0.1:
+                pick = "OVER";
+                res = "🟢" if (row['FTHG'] + row['FTAG']) > 2.5 else "🔴"
+            elif ((1 - p_over) * row['B365_U25']) - 1 > 0.1:
+                pick = "UNDER";
+                res = "🟢" if (row['FTHG'] + row['FTAG']) < 2.5 else "🔴"
 
-            total_goals = row['FTHG'] + row['FTAG']
-            real_res = "O" if total_goals > 2.5 else "U"
+        rows.append(
+            {"Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}", "Wynik": f"{int(row['FTHG'])}-{int(row['FTAG'])}",
+             "AI": pick, "Status": res})
 
-            val_o = (p_over * row['B365_O25']) - 1
-            val_u = ((1 - p_over) * row['B365_U25']) - 1
-
-            pick = "Brak"
-            result_color = "⚪"
-
-            if val_o > 0.1:
-                pick = f"OVER (@{row['B365_O25']})"
-                result_color = "🟢 WIN" if real_res == "O" else "🔴 LOSS"
-            elif val_u > 0.1:
-                pick = f"UNDER (@{row['B365_U25']})"
-                result_color = "🟢 WIN" if real_res == "U" else "🔴 LOSS"
-
-        history_rows.append({
-            "Data": row['Date'].strftime('%d.%m'),
-            "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
-            "Wynik": f"{int(row['FTHG'])}-{int(row['FTAG'])}",
-            "Model by zagrał": pick,
-            "Rozliczenie": result_color
-        })
-
-    st.dataframe(pd.DataFrame(history_rows))
+    st.dataframe(pd.DataFrame(rows))
