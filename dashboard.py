@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import poisson
+import plotly.graph_objects as go  # <--- NOWOŚĆ
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(page_title="AI Football Sniper Ultimate", layout="wide", page_icon="⚽")
@@ -19,12 +20,9 @@ def get_upcoming_fixtures(league_name):
     try:
         df = pd.read_csv(url, encoding='utf-8-sig', on_bad_lines='skip')
         df.columns = df.columns.str.strip()
-
         if 'Div' not in df.columns:
             for col in df.columns:
-                if 'Div' in col or 'Division' in col:
-                    df = df.rename(columns={col: 'Div'})
-                    break
+                if 'Div' in col or 'Division' in col: df = df.rename(columns={col: 'Div'}); break
         if 'Div' not in df.columns: return pd.DataFrame()
 
         league_map = {
@@ -37,7 +35,6 @@ def get_upcoming_fixtures(league_name):
         div_code = league_map.get(league_name)
         league_fixtures = df[df['Div'] == div_code].copy()
         league_fixtures['Date'] = pd.to_datetime(league_fixtures['Date'], dayfirst=True, errors='coerce')
-
         today = pd.Timestamp.now().normalize()
         future_games = league_fixtures[league_fixtures['Date'] >= today]
         return future_games.sort_values(['Date', 'Time'])
@@ -50,7 +47,7 @@ def load_and_prep_data(league_name):
     try:
         db_url = st.secrets["DB_URL"]
         engine = create_engine(db_url)
-    except Exception as e:
+    except Exception:
         st.error("❌ Błąd: Nie znaleziono sekretów bazy danych!")
         st.stop()
 
@@ -70,7 +67,6 @@ def load_and_prep_data(league_name):
     return df
 
 
-# --- NOWA FUNKCJA H2H ---
 def get_h2h_history(df, team1, team2):
     mask = ((df['HomeTeam'] == team1) & (df['AwayTeam'] == team2)) | \
            ((df['HomeTeam'] == team2) & (df['AwayTeam'] == team1))
@@ -78,11 +74,34 @@ def get_h2h_history(df, team1, team2):
     return h2h
 
 
-# ------------------------
+def plot_radar_chart(h_stats, a_stats, home_name, away_name):
+    categories = ['Atak (Gole)', 'Obrona (Stracone)', 'Rożne', 'Strzały (skala /3)', 'Kartki (skala x2)',
+                  'Faule (skala /3)']
+
+    # Skalowanie dla czytelności wykresu
+    h_values = [
+        h_stats['Home_Att'], h_stats['Home_Def'], h_stats['Home_Corners_Avg'],
+        h_stats['Home_Shots_Avg'] / 3, h_stats['Home_Cards_Avg'] * 2, h_stats['Home_Fouls_Avg'] / 3
+    ]
+    a_values = [
+        a_stats['Away_Att'], a_stats['Away_Def'], a_stats['Away_Corners_Avg'],
+        a_stats['Away_Shots_Avg'] / 3, a_stats['Away_Cards_Avg'] * 2, a_stats['Away_Fouls_Avg'] / 3
+    ]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(r=h_values, theta=categories, fill='toself', name=home_name, line_color='blue'))
+    fig.add_trace(go.Scatterpolar(r=a_values, theta=categories, fill='toself', name=away_name, line_color='red'))
+
+    fig.update_layout(
+        polar=dict(radialaxis=dict(visible=True, range=[0, max(max(h_values), max(a_values)) + 1])),
+        margin=dict(l=40, r=40, t=40, b=40),
+        height=400
+    )
+    return fig
+
 
 def add_rolling_features(df, window=5):
     data = df.copy()
-
     for col in ['HS', 'AS', 'HY', 'AY', 'HF', 'AF']:
         if col not in data.columns: data[col] = 0
 
@@ -99,16 +118,13 @@ def add_rolling_features(df, window=5):
     away_df['IsHome'] = 0
 
     team_stats = pd.concat([home_df, away_df]).sort_values('Date')
-
     features = team_stats.groupby('Team')[['GS', 'GC', 'Pts', 'CorW', 'ShotsW', 'Cards', 'Fouls']].transform(
         lambda x: x.rolling(window, min_periods=3).mean().shift(1)
     )
-
     team_stats[['Form_Att', 'Form_Def', 'Form_Pts', 'Form_Cor', 'Form_Shots', 'Form_Cards', 'Form_Fouls']] = features
 
     cols_to_keep = ['Date', 'Team', 'Form_Att', 'Form_Def', 'Form_Pts', 'Form_Cor', 'Form_Shots', 'Form_Cards',
                     'Form_Fouls']
-
     h_stats = team_stats[team_stats['IsHome'] == 1][cols_to_keep].rename(
         columns={'Team': 'HomeTeam', 'Form_Att': 'Home_Att', 'Form_Def': 'Home_Def', 'Form_Pts': 'Home_Form',
                  'Form_Cor': 'Home_Corners_Avg', 'Form_Shots': 'Home_Shots_Avg', 'Form_Cards': 'Home_Cards_Avg',
@@ -121,7 +137,6 @@ def add_rolling_features(df, window=5):
     data = pd.merge(data, h_stats, on=['Date', 'HomeTeam'], how='left')
     data = pd.merge(data, a_stats, on=['Date', 'AwayTeam'], how='left')
     data['OddsDiff'] = (1 / data['B365H']) - (1 / data['B365A'])
-
     return data.dropna()
 
 
@@ -280,8 +295,6 @@ with tab1:
 # --- TAB 2: ANALIZA SZCZEGÓŁOWA (ULEPSZONA) ---
 with tab2:
     st.header("Centrum Analizy Meczu")
-
-    # 1. Przygotowanie mapy meczów
     match_opts = ["Wybierz ręcznie..."]
     match_map = {}
     if not fixtures.empty:
@@ -290,49 +303,36 @@ with tab2:
             match_opts.append(lbl)
             match_map[lbl] = row
 
-    # 2. Wybór z terminarza
     sel_fix = st.selectbox("Wybierz mecz z terminarza", match_opts, key="tab2_select")
-
-    # --- MECHANIZM AUTO-UZUPEŁNIANIA (BEZPIECZNY) ---
     if "last_fix_t2" not in st.session_state: st.session_state.last_fix_t2 = None
-
     if sel_fix != st.session_state.last_fix_t2:
         st.session_state.last_fix_t2 = sel_fix
-
         if sel_fix != "Wybierz ręcznie..." and sel_fix in match_map:
             md = match_map[sel_fix]
-
-            # Drużyny
             st.session_state['t2_h'] = md['HomeTeam']
             st.session_state['t2_a'] = md['AwayTeam']
 
 
-            # --- BEZPIECZNE KURSY (Sprawdzamy czy > 1.0) ---
             def safe_get(key, default=2.0):
                 try:
-                    val = float(md.get(key, 0.0))
-                    return val if val > 1.0 else default
+                    val = float(md.get(key, 0.0)); return val if val > 1.0 else default
                 except:
                     return default
 
 
-            st.session_state['k_1'] = safe_get('B365H', 2.0)
-            st.session_state['k_x'] = safe_get('B365D', 3.2)
+            st.session_state['k_1'] = safe_get('B365H', 2.0);
+            st.session_state['k_x'] = safe_get('B365D', 3.2);
             st.session_state['k_2'] = safe_get('B365A', 3.5)
-            st.session_state['k_o'] = safe_get('B365>2.5', 1.9)
+            st.session_state['k_o'] = safe_get('B365>2.5', 1.9);
             st.session_state['k_u'] = safe_get('B365<2.5', 1.9)
 
-    # 3. Wyświetlanie
     c1, c2 = st.columns(2)
     teams = sorted(raw_data['HomeTeam'].unique())
-
-    # Czyszczenie session state z błędnych drużyn
     try:
         if 't2_h' in st.session_state and st.session_state.t2_h not in teams: del st.session_state.t2_h
         if 't2_a' in st.session_state and st.session_state.t2_a not in teams: del st.session_state.t2_a
     except:
         pass
-
     home_team = c1.selectbox("Gospodarz", teams, key="t2_h")
     away_team = c2.selectbox("Gość", teams, key="t2_a")
 
@@ -349,8 +349,6 @@ with tab2:
 
     st.divider()
     st.write("Kursy:")
-
-    # Inputy z zabezpieczeniem min_value=1.01 (żeby nie wpisać 0)
     k1, k2, k3 = st.columns(3)
     if bet_type == "Zwycięzca (1X2)":
         o1 = k1.number_input("1", value=2.0, min_value=1.01, step=0.05, key="k_1")
@@ -365,28 +363,20 @@ with tab2:
         h_stat = processed_data[processed_data['HomeTeam'] == home_team].iloc[-1]
         a_stat = processed_data[processed_data['AwayTeam'] == away_team].iloc[-1]
 
-        st.subheader("📈 Trend Formy (Ostatnie 10 spotkań)")
-
-        # Pobieramy same wartości formy (bez dat) dla ostatnich 10 meczów
-        h_vals = processed_data[processed_data['HomeTeam'] == home_team].tail(10)['Home_Form'].values
-        a_vals = processed_data[processed_data['AwayTeam'] == away_team].tail(10)['Away_Form'].values
-
-        # Zabezpieczenie: Upewniamy się, że mamy co rysować
-        min_len = min(len(h_vals), len(a_vals))
-
-        if min_len > 1:
-            # Tworzymy DataFrame z ujednoliconym indeksem (po prostu numer meczu)
-            chart_df = pd.DataFrame({
-                f"{home_team}": h_vals[-min_len:],
-                f"{away_team}": a_vals[-min_len:]
-            })
-            # Ustawiamy indeks od 1 do N dla czytelności na osi X
-            chart_df.index = range(1, min_len + 1)
-
-            st.line_chart(chart_df)
-            st.caption("Oś X: Kolejne mecze (1 = najstarszy, 10 = ostatni). Oś Y: Średnia punktów (Forma).")
-        else:
-            st.warning("Zbyt mało danych, aby wygenerować wiarygodny wykres trendu.")
+        # WYKRESY
+        st.subheader("📊 Analiza Siły (Radar) i Trendu")
+        c_rad, c_line = st.columns(2)
+        with c_rad:
+            st.plotly_chart(plot_radar_chart(h_stat, a_stat, home_team, away_team), use_container_width=True)
+        with c_line:
+            h_vals = processed_data[processed_data['HomeTeam'] == home_team].tail(10)['Home_Form'].values
+            a_vals = processed_data[processed_data['AwayTeam'] == away_team].tail(10)['Away_Form'].values
+            min_len = min(len(h_vals), len(a_vals))
+            if min_len > 1:
+                chart_df = pd.DataFrame({f"{home_team}": h_vals[-min_len:], f"{away_team}": a_vals[-min_len:]})
+                chart_df.index = range(1, min_len + 1)
+                st.line_chart(chart_df)
+                st.caption("Oś X: Mecze (10 = ostatni)")
 
         input_data = pd.DataFrame([{
             'Home_Att': h_stat['Home_Att'], 'Away_Att': a_stat['Away_Att'],
@@ -425,7 +415,6 @@ with tab2:
         xg_h = (h_stat['Home_Att'] + a_stat['Away_Def']) / 2
         xg_a = (a_stat['Away_Att'] + h_stat['Home_Def']) / 2
         c1, c2 = st.columns([2, 1])
-        c1.write("Heatmapa Wyników:")
         c1.pyplot(plot_score_heatmap(xg_h, xg_a))
         c2.info(f"xG: {xg_h:.2f} - {xg_a:.2f}")
 
