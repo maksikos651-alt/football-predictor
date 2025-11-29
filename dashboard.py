@@ -194,7 +194,7 @@ def plot_score_heatmap(home_exp, away_exp):
 
 # --- 2. INTERFEJS GŁÓWNY ---
 
-st.title("⚽ AI Football Sniper Ultimate")
+st.title("⚽ Typy Grzegorza")
 
 # --- PANEL BOCZNY ---
 st.sidebar.header("Ustawienia")
