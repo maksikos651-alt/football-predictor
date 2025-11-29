@@ -225,6 +225,12 @@ bet_type = st.sidebar.radio("Strategia", ["Zwycięzca (1X2)", "Gole (Over/Under 
 bankroll = st.sidebar.number_input("Bankroll (PLN)", 1000)
 kelly_frac = st.sidebar.slider("Kelly %", 0.05, 0.2, 0.1)
 
+
+# --- Wklej to, żeby przywrócić ROI ---
+col_roi1, col_roi2 = st.sidebar.columns(2)
+col_roi1.metric("ROI 1X2", f"{cfg['roi_1x2']}%", delta_color="normal" if cfg['roi_1x2'] > 0 else "off")
+col_roi2.metric("ROI O/U", f"{cfg['roi_ou']}%", delta_color="normal" if cfg['roi_ou'] > 0 else "off")
+# -------------------------------------
 # --- OPTYMALIZACJA ŁADOWANIA ---
 with st.spinner("Ładowanie i przetwarzanie danych (to zdarza się raz na 24h)..."):
     # 1. Pobieramy WSZYSTKO (z Cache)
