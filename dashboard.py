@@ -280,6 +280,8 @@ with tab1:
 # --- TAB 2: ANALIZA SZCZEGÓŁOWA (ULEPSZONA) ---
 with tab2:
     st.header("Centrum Analizy Meczu")
+
+    # 1. Przygotowanie mapy meczów
     match_opts = ["Wybierz ręcznie..."]
     match_map = {}
     if not fixtures.empty:
@@ -288,28 +290,45 @@ with tab2:
             match_opts.append(lbl)
             match_map[lbl] = row
 
+    # 2. Wybór z terminarza
     sel_fix = st.selectbox("Wybierz mecz z terminarza", match_opts, key="tab2_select")
-    def_h, def_a = 0, 1
-    d_o1, d_ox, d_o2 = 2.0, 3.2, 3.5
-    d_oo, d_ou = 1.9, 1.9
-    if sel_fix != "Wybierz ręcznie...":
-        md = match_map[sel_fix]
-        teams = sorted(raw_data['HomeTeam'].unique())
-        try:
-            def_h = teams.index(md['HomeTeam']);
-            def_a = teams.index(md['AwayTeam'])
-            if pd.notnull(md.get('B365H')): d_o1 = float(md['B365H'])
-            if pd.notnull(md.get('B365D')): d_ox = float(md['B365D'])
-            if pd.notnull(md.get('B365A')): d_o2 = float(md['B365A'])
-            if pd.notnull(md.get('B365>2.5')): d_oo = float(md['B365>2.5'])
-            if pd.notnull(md.get('B365<2.5')): d_ou = float(md['B365<2.5'])
-        except:
-            pass
 
+    # --- MECHANIZM AUTO-UZUPEŁNIANIA (TO NAPRAWIA PROBLEM) ---
+    # Sprawdzamy, czy wybór w terminarzu się zmienił. Jeśli tak -> nadpisujemy pola niżej.
+    if "last_fix_t2" not in st.session_state: st.session_state.last_fix_t2 = None
+
+    if sel_fix != st.session_state.last_fix_t2:
+        st.session_state.last_fix_t2 = sel_fix  # Zapamiętujemy nowy wybór
+
+        if sel_fix != "Wybierz ręcznie..." and sel_fix in match_map:
+            md = match_map[sel_fix]
+
+            # Wymuszamy zmianę drużyn w Session State
+            st.session_state['t2_h'] = md['HomeTeam']
+            st.session_state['t2_a'] = md['AwayTeam']
+
+            # Wymuszamy zmianę kursów (żebyś nie musiał wpisywać ręcznie)
+            if pd.notnull(md.get('B365H')): st.session_state['k_1'] = float(md['B365H'])
+            if pd.notnull(md.get('B365D')): st.session_state['k_x'] = float(md['B365D'])
+            if pd.notnull(md.get('B365A')): st.session_state['k_2'] = float(md['B365A'])
+            if pd.notnull(md.get('B365>2.5')): st.session_state['k_o'] = float(md['B365>2.5'])
+            if pd.notnull(md.get('B365<2.5')): st.session_state['k_u'] = float(md['B365<2.5'])
+
+    # 3. Wyświetlanie Selectboxów (Teraz pobiorą nowe wartości z Session State)
     c1, c2 = st.columns(2)
     teams = sorted(raw_data['HomeTeam'].unique())
-    home_team = c1.selectbox("Gospodarz", teams, index=def_h, key="t2_h")
-    away_team = c2.selectbox("Gość", teams, index=def_a, key="t2_a")
+
+    # Uwaga: key="t2_h" i key="t2_a" są kluczowe, bo to je aktualizujemy wyżej
+    # Używamy index=None, bo sterujemy wszystkim przez klucze
+    try:
+        # Zabezpieczenie na wypadek gdyby w session state było coś spoza listy teams
+        if 't2_h' in st.session_state and st.session_state.t2_h not in teams: del st.session_state.t2_h
+        if 't2_a' in st.session_state and st.session_state.t2_a not in teams: del st.session_state.t2_a
+    except:
+        pass
+
+    home_team = c1.selectbox("Gospodarz", teams, key="t2_h")
+    away_team = c2.selectbox("Gość", teams, key="t2_a")
 
     # H2H
     st.divider()
@@ -326,12 +345,12 @@ with tab2:
     st.write("Kursy:")
     k1, k2, k3 = st.columns(3)
     if bet_type == "Zwycięzca (1X2)":
-        o1 = k1.number_input("1", d_o1, key="k_1");
-        ox = k2.number_input("X", d_ox, key="k_x");
-        o2 = k3.number_input("2", d_o2, key="k_2")
+        o1 = k1.number_input("1", 2.0, key="k_1")
+        ox = k2.number_input("X", 3.2, key="k_x")
+        o2 = k3.number_input("2", 3.5, key="k_2")
     else:
-        oo = k1.number_input("Over", d_oo, key="k_o");
-        ou = k2.number_input("Under", d_ou, key="k_u")
+        oo = k1.number_input("Over", 1.9, key="k_o")
+        ou = k2.number_input("Under", 1.9, key="k_u")
         o1, o2, ox = 0, 0, 0
 
     if st.button("URUCHOM AI", type="primary", key="btn_ai"):
