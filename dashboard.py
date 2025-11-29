@@ -158,7 +158,7 @@ def train_model(df, prediction_type="1X2"):
                   'Home_Corners_Avg', 'Away_Corners_Avg', 'Home_Shots_Avg', 'Away_Shots_Avg', 'Home_Cards_Avg',
                   'Away_Cards_Avg', 'Home_Fouls_Avg', 'Away_Fouls_Avg']
     best_params = {'n_estimators': 300, 'learning_rate': 0.01, 'max_depth': 4, 'subsample': 0.7,
-                   'colsample_bytree': 0.8, 'n_jobs': -1}
+                   'colsample_bytree': 0.8, 'n_jobs': 1}
 
     if prediction_type == "1X2":
         predictors += ['B365H', 'B365A', 'B365D']
