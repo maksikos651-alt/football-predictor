@@ -293,35 +293,41 @@ with tab2:
     # 2. Wybór z terminarza
     sel_fix = st.selectbox("Wybierz mecz z terminarza", match_opts, key="tab2_select")
 
-    # --- MECHANIZM AUTO-UZUPEŁNIANIA (TO NAPRAWIA PROBLEM) ---
-    # Sprawdzamy, czy wybór w terminarzu się zmienił. Jeśli tak -> nadpisujemy pola niżej.
+    # --- MECHANIZM AUTO-UZUPEŁNIANIA (BEZPIECZNY) ---
     if "last_fix_t2" not in st.session_state: st.session_state.last_fix_t2 = None
 
     if sel_fix != st.session_state.last_fix_t2:
-        st.session_state.last_fix_t2 = sel_fix  # Zapamiętujemy nowy wybór
+        st.session_state.last_fix_t2 = sel_fix
 
         if sel_fix != "Wybierz ręcznie..." and sel_fix in match_map:
             md = match_map[sel_fix]
 
-            # Wymuszamy zmianę drużyn w Session State
+            # Drużyny
             st.session_state['t2_h'] = md['HomeTeam']
             st.session_state['t2_a'] = md['AwayTeam']
 
-            # Wymuszamy zmianę kursów (żebyś nie musiał wpisywać ręcznie)
-            if pd.notnull(md.get('B365H')): st.session_state['k_1'] = float(md['B365H'])
-            if pd.notnull(md.get('B365D')): st.session_state['k_x'] = float(md['B365D'])
-            if pd.notnull(md.get('B365A')): st.session_state['k_2'] = float(md['B365A'])
-            if pd.notnull(md.get('B365>2.5')): st.session_state['k_o'] = float(md['B365>2.5'])
-            if pd.notnull(md.get('B365<2.5')): st.session_state['k_u'] = float(md['B365<2.5'])
 
-    # 3. Wyświetlanie Selectboxów (Teraz pobiorą nowe wartości z Session State)
+            # --- BEZPIECZNE KURSY (Sprawdzamy czy > 1.0) ---
+            def safe_get(key, default=2.0):
+                try:
+                    val = float(md.get(key, 0.0))
+                    return val if val > 1.0 else default
+                except:
+                    return default
+
+
+            st.session_state['k_1'] = safe_get('B365H', 2.0)
+            st.session_state['k_x'] = safe_get('B365D', 3.2)
+            st.session_state['k_2'] = safe_get('B365A', 3.5)
+            st.session_state['k_o'] = safe_get('B365>2.5', 1.9)
+            st.session_state['k_u'] = safe_get('B365<2.5', 1.9)
+
+    # 3. Wyświetlanie
     c1, c2 = st.columns(2)
     teams = sorted(raw_data['HomeTeam'].unique())
 
-    # Uwaga: key="t2_h" i key="t2_a" są kluczowe, bo to je aktualizujemy wyżej
-    # Używamy index=None, bo sterujemy wszystkim przez klucze
+    # Czyszczenie session state z błędnych drużyn
     try:
-        # Zabezpieczenie na wypadek gdyby w session state było coś spoza listy teams
         if 't2_h' in st.session_state and st.session_state.t2_h not in teams: del st.session_state.t2_h
         if 't2_a' in st.session_state and st.session_state.t2_a not in teams: del st.session_state.t2_a
     except:
@@ -343,21 +349,22 @@ with tab2:
 
     st.divider()
     st.write("Kursy:")
+
+    # Inputy z zabezpieczeniem min_value=1.01 (żeby nie wpisać 0)
     k1, k2, k3 = st.columns(3)
     if bet_type == "Zwycięzca (1X2)":
-        o1 = k1.number_input("1", 2.0, key="k_1")
-        ox = k2.number_input("X", 3.2, key="k_x")
-        o2 = k3.number_input("2", 3.5, key="k_2")
+        o1 = k1.number_input("1", value=2.0, min_value=1.01, step=0.05, key="k_1")
+        ox = k2.number_input("X", value=3.2, min_value=1.01, step=0.05, key="k_x")
+        o2 = k3.number_input("2", value=3.5, min_value=1.01, step=0.05, key="k_2")
     else:
-        oo = k1.number_input("Over", 1.9, key="k_o")
-        ou = k2.number_input("Under", 1.9, key="k_u")
+        oo = k1.number_input("Over", value=1.9, min_value=1.01, step=0.05, key="k_o")
+        ou = k2.number_input("Under", value=1.9, min_value=1.01, step=0.05, key="k_u")
         o1, o2, ox = 0, 0, 0
 
     if st.button("URUCHOM AI", type="primary", key="btn_ai"):
         h_stat = processed_data[processed_data['HomeTeam'] == home_team].iloc[-1]
         a_stat = processed_data[processed_data['AwayTeam'] == away_team].iloc[-1]
 
-        # Wykres formy
         st.subheader("📈 Trend Formy")
         h_trend = processed_data[processed_data['HomeTeam'] == home_team].tail(10).set_index('Date')['Home_Form']
         a_trend = processed_data[processed_data['AwayTeam'] == away_team].tail(10).set_index('Date')['Away_Form']
