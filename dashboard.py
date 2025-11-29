@@ -225,6 +225,7 @@ bet_type = st.sidebar.radio("Strategia", ["Zwycięzca (1X2)", "Gole (Over/Under 
 bankroll = st.sidebar.number_input("Bankroll (PLN)", 1000)
 kelly_frac = st.sidebar.slider("Kelly %", 0.05, 0.2, 0.1)
 
+# --- OPTYMALIZACJA ŁADOWANIA ---
 with st.spinner("Ładowanie i przetwarzanie danych (to zdarza się raz na 24h)..."):
     # 1. Pobieramy WSZYSTKO (z Cache)
     all_data = load_all_data()
@@ -236,8 +237,12 @@ with st.spinner("Ładowanie i przetwarzanie danych (to zdarza się raz na 24h)..
 
     if processed_data.empty: st.warning(f"Brak danych dla ligi: {selected_league}"); st.stop()
 
+    # --- POPRAWKA: TWORZYMY KOPIĘ DLA KOMPATYBILNOŚCI ---
+    # Dzięki temu reszta kodu (tabele, listy drużyn) widzi zmienną "raw_data" i nie wyrzuca błędu
+    raw_data = processed_data
+    # ----------------------------------------------------
+
     # 3. Trenujemy model tylko na wycinku danych (Szybko)
-    # Modelu nie cache'ujemy globalnie, bo każda liga ma inną specyfikę
     train_mode = "1X2" if bet_type == "Zwycięzca (1X2)" else "OU25"
     model, features = train_model(processed_data, train_mode)
 # --- ZAKŁADKI ---
