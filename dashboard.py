@@ -76,6 +76,14 @@ def load_and_prep_data(league_name):
     return df
 
 
+def get_h2h_history(df, team1, team2):
+    # Szukamy meczów gdzie grały te dwie drużyny (w dowolnej konfiguracji)
+    mask = ((df['HomeTeam'] == team1) & (df['AwayTeam'] == team2)) | \
+           ((df['HomeTeam'] == team2) & (df['AwayTeam'] == team1))
+
+    h2h = df[mask].sort_values('Date', ascending=False).head(5)  # Ostatnie 5 meczów
+    return h2h
+
 def add_rolling_features(df, window=5):
     data = df.copy()
 
@@ -324,6 +332,9 @@ with tab1:
 
 # --- TAB 2: ANALIZA MANUALNA ---
 with tab2:
+    st.header("Centrum Analizy Meczu")
+
+    # Wybór meczu (tak jak wcześniej)
     match_opts = ["Wybierz ręcznie..."]
     match_map = {}
     if not fixtures.empty:
@@ -332,7 +343,9 @@ with tab2:
             match_opts.append(lbl)
             match_map[lbl] = row
 
-    sel_fix = st.selectbox("Terminarz", match_opts)
+    sel_fix = st.selectbox("Wybierz mecz z terminarza", match_opts, key="tab2_select")
+
+    # Domyślne
     def_h, def_a = 0, 1
     d_o1, d_ox, d_o2 = 2.0, 3.2, 3.5
     d_oo, d_ou = 1.9, 1.9
@@ -353,23 +366,65 @@ with tab2:
 
     c1, c2 = st.columns(2)
     teams = sorted(raw_data['HomeTeam'].unique())
-    home_team = c1.selectbox("Gospodarz", teams, index=def_h)
-    away_team = c2.selectbox("Gość", teams, index=def_a)
+    home_team = c1.selectbox("Gospodarz", teams, index=def_h, key="t2_h")
+    away_team = c2.selectbox("Gość", teams, index=def_a, key="t2_a")
 
+    # --- SEKCJA H2H (NOWOŚĆ) ---
+    st.divider()
+    st.subheader("⚔️ Historia H2H (Ostatnie 5 spotkań)")
+    h2h_data = get_h2h_history(raw_data, home_team, away_team)
+
+    if h2h_data.empty:
+        st.info("Brak bezpośrednich meczów w bazie.")
+    else:
+        for idx, row in h2h_data.iterrows():
+            # Kolorowanie wyniku
+            color = "gray"
+            if row['FTR'] == 'H':
+                winner = row['HomeTeam']
+                color = "green" if winner == home_team else "red"
+            elif row['FTR'] == 'A':
+                winner = row['AwayTeam']
+                color = "green" if winner == home_team else "red"
+            else:
+                color = "orange"  # Remis
+
+            st.markdown(
+                f"📅 {row['Date'].strftime('%d.%m.%Y')} | **{row['HomeTeam']}** {int(row['FTHG'])} - {int(row['FTAG'])} **{row['AwayTeam']}**")
+
+    st.divider()
+
+    # --- INPUTY KURSOWE ---
+    st.write("Kursy Bukmachera:")
     k1, k2, k3 = st.columns(3)
     if bet_type == "Zwycięzca (1X2)":
-        o1 = k1.number_input("1", d_o1);
-        ox = k2.number_input("X", d_ox);
-        o2 = k3.number_input("2", d_o2)
+        o1 = k1.number_input("1", d_o1, key="k_1");
+        ox = k2.number_input("X", d_ox, key="k_x");
+        o2 = k3.number_input("2", d_o2, key="k_2")
     else:
-        oo = k1.number_input("Over", d_oo);
-        ou = k2.number_input("Under", d_ou)
+        oo = k1.number_input("Over", d_oo, key="k_o");
+        ou = k2.number_input("Under", d_ou, key="k_u")
         o1, o2, ox = 0, 0, 0
 
-    if st.button("ANALIZA", type="primary"):
+    if st.button("URUCHOM AI", type="primary", key="btn_ai"):
+        # Pobieranie statystyk
         h_stat = processed_data[processed_data['HomeTeam'] == home_team].iloc[-1]
         a_stat = processed_data[processed_data['AwayTeam'] == away_team].iloc[-1]
 
+        # --- WIZUALIZACJA FORMY (NOWOŚĆ) ---
+        st.subheader("📈 Trend Formy (Ostatnie 10 meczów)")
+
+        # Pobieramy historię dla obu drużyn
+        h_trend = processed_data[processed_data['HomeTeam'] == home_team].tail(10).set_index('Date')['Home_Form']
+        a_trend = processed_data[processed_data['AwayTeam'] == away_team].tail(10).set_index('Date')['Away_Form']
+
+        chart_data = pd.DataFrame({
+            f"{home_team} (Pkt)": h_trend,
+            f"{away_team} (Pkt)": a_trend
+        })
+        st.line_chart(chart_data)
+
+        # --- PRECYZYJNE DANE ---
         input_data = pd.DataFrame([{
             'Home_Att': h_stat['Home_Att'], 'Away_Att': a_stat['Away_Att'],
             'Home_Def': h_stat['Home_Def'], 'Away_Def': a_stat['Away_Def'],
@@ -380,19 +435,20 @@ with tab2:
             'Home_Fouls_Avg': h_stat['Home_Fouls_Avg'], 'Away_Fouls_Avg': a_stat['Away_Fouls_Avg']
         }])
 
+        # Predykcja
         if bet_type == "Zwycięzca (1X2)":
             input_data['OddsDiff'] = (1 / o1) - (1 / o2)
             input_data['B365H'] = o1;
             input_data['B365D'] = ox;
             input_data['B365A'] = o2
-            input_data = input_data[features]  # Sort
+            input_data = input_data[features]
             probs = model.predict_proba(input_data)[0]
             outcomes = [("1", probs[2], o1), ("X", probs[1], ox), ("2", probs[0], o2)]
         else:
             input_data['OddsDiff'] = (1 / oo) - (1 / ou)
             input_data['B365_O25'] = oo;
             input_data['B365_U25'] = ou
-            input_data = input_data[features]  # Sort
+            input_data = input_data[features]
             p_over = model.predict_proba(input_data)[0][1]
             outcomes = [("Over", p_over, oo), ("Under", 1 - p_over, ou)]
 
@@ -407,8 +463,9 @@ with tab2:
         xg_h = (h_stat['Home_Att'] + a_stat['Away_Def']) / 2
         xg_a = (a_stat['Away_Att'] + h_stat['Home_Def']) / 2
         c1, c2 = st.columns([2, 1])
+        c1.write("Heatmapa Wyników:")
         c1.pyplot(plot_score_heatmap(xg_h, xg_a))
-        c2.info(f"xG: {xg_h:.2f} - {xg_a:.2f}")
+        c2.info(f"Przewidywane xG:\n\n{home_team}: {xg_h:.2f}\n{away_team}: {xg_a:.2f}")
 
 # --- TAB 3: HISTORIA ---
 with tab3:
