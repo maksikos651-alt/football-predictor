@@ -9,7 +9,7 @@ from scipy.stats import poisson
 import plotly.graph_objects as go  # <--- NOWOŚĆ
 
 # --- KONFIGURACJA STRONY ---
-st.set_page_config(page_title="AI Football Sniper Ultimate", layout="wide", page_icon="⚽")
+st.set_page_config(page_title="Typy Grezegorza", layout="wide", page_icon="⚽")
 
 
 # --- 1. FUNKCJE SILNIKA (Backend) ---
