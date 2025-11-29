@@ -225,6 +225,8 @@ bet_type = st.sidebar.radio("Strategia", ["Zwycięzca (1X2)", "Gole (Over/Under 
 bankroll = st.sidebar.number_input("Bankroll (PLN)", 1000)
 kelly_frac = st.sidebar.slider("Kelly %", 0.05, 0.2, 0.1)
 
+cfg = league_config.get(selected_league, {"roi_1x2":0,"roi_ou":0,"recom":"?"})
+st.sidebar.info(f"{cfg['recom']}")
 
 # --- Wklej to, żeby przywrócić ROI ---
 col_roi1, col_roi2 = st.sidebar.columns(2)
