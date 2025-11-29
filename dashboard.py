@@ -365,10 +365,28 @@ with tab2:
         h_stat = processed_data[processed_data['HomeTeam'] == home_team].iloc[-1]
         a_stat = processed_data[processed_data['AwayTeam'] == away_team].iloc[-1]
 
-        st.subheader("📈 Trend Formy")
-        h_trend = processed_data[processed_data['HomeTeam'] == home_team].tail(10).set_index('Date')['Home_Form']
-        a_trend = processed_data[processed_data['AwayTeam'] == away_team].tail(10).set_index('Date')['Away_Form']
-        st.line_chart(pd.DataFrame({f"{home_team}": h_trend, f"{away_team}": a_trend}))
+        st.subheader("📈 Trend Formy (Ostatnie 10 spotkań)")
+
+        # Pobieramy same wartości formy (bez dat) dla ostatnich 10 meczów
+        h_vals = processed_data[processed_data['HomeTeam'] == home_team].tail(10)['Home_Form'].values
+        a_vals = processed_data[processed_data['AwayTeam'] == away_team].tail(10)['Away_Form'].values
+
+        # Zabezpieczenie: Upewniamy się, że mamy co rysować
+        min_len = min(len(h_vals), len(a_vals))
+
+        if min_len > 1:
+            # Tworzymy DataFrame z ujednoliconym indeksem (po prostu numer meczu)
+            chart_df = pd.DataFrame({
+                f"{home_team}": h_vals[-min_len:],
+                f"{away_team}": a_vals[-min_len:]
+            })
+            # Ustawiamy indeks od 1 do N dla czytelności na osi X
+            chart_df.index = range(1, min_len + 1)
+
+            st.line_chart(chart_df)
+            st.caption("Oś X: Kolejne mecze (1 = najstarszy, 10 = ostatni). Oś Y: Średnia punktów (Forma).")
+        else:
+            st.warning("Zbyt mało danych, aby wygenerować wiarygodny wykres trendu.")
 
         input_data = pd.DataFrame([{
             'Home_Att': h_stat['Home_Att'], 'Away_Att': a_stat['Away_Att'],
