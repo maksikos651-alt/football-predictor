@@ -42,18 +42,24 @@ def get_upcoming_fixtures(league_name):
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=3600)
-def load_and_prep_data(league_name):
+@st.cache_data(ttl=86400)  # <--- ZMIANA: Pamięć na 24 godziny!
+def load_all_data():
+    """Pobiera całą bazę danych naraz i oblicza statystyki dla wszystkich lig."""
     try:
         db_url = st.secrets["DB_URL"]
         engine = create_engine(db_url)
-    except Exception:
-        st.error("❌ Błąd: Nie znaleziono sekretów bazy danych!")
-        st.stop()
+    except:
+        # Fallback lokalny
+        DB_USER = 'postgres'
+        DB_PASS = 'EAtocepy12!'
+        DB_HOST = 'localhost'
+        engine = create_engine(f'postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:5432/postgres')
 
-    query = f"SELECT * FROM matches WHERE league = '{league_name}' ORDER BY date ASC"
+    # Pobieramy WSZYSTKO (bez filtrowania WHERE league=...)
+    query = "SELECT * FROM matches ORDER BY date ASC"
     df = pd.read_sql(query, engine)
 
+    # Zmiana nazw kolumn
     df = df.rename(columns={
         'date': 'Date', 'home_team': 'HomeTeam', 'away_team': 'AwayTeam',
         'home_goals': 'FTHG', 'away_goals': 'FTAG', 'result': 'FTR',
@@ -62,9 +68,15 @@ def load_and_prep_data(league_name):
         'home_corners': 'HC', 'away_corners': 'AC',
         'home_shots': 'HS', 'away_shots': 'AS',
         'home_yellow': 'HY', 'away_yellow': 'AY',
-        'home_fouls': 'HF', 'away_fouls': 'AF'
+        'home_fouls': 'HF', 'away_fouls': 'AF',
+        'league': 'League'  # Ważne: zachowujemy kolumnę League do filtrowania później
     })
-    return df
+
+    # --- PRZELICZANIE STATYSTYK (ROLLING) DLA CAŁEJ BAZY RAZEM ---
+    # Dzięki temu robimy to raz, a nie przy każdym kliknięciu
+    processed_df = add_rolling_features(df)
+
+    return processed_df
 
 
 def get_h2h_history(df, team1, team2):
@@ -213,16 +225,21 @@ bet_type = st.sidebar.radio("Strategia", ["Zwycięzca (1X2)", "Gole (Over/Under 
 bankroll = st.sidebar.number_input("Bankroll (PLN)", 1000)
 kelly_frac = st.sidebar.slider("Kelly %", 0.05, 0.2, 0.1)
 
-cfg = league_config.get(selected_league, {"roi_1x2": 0, "roi_ou": 0, "recom": "?"})
-st.sidebar.info(f"{cfg['recom']}")
+with st.spinner("Ładowanie i przetwarzanie danych (to zdarza się raz na 24h)..."):
+    # 1. Pobieramy WSZYSTKO (z Cache)
+    all_data = load_all_data()
 
-with st.spinner("Ładowanie AI..."):
-    raw_data = load_and_prep_data(selected_league)
-    if raw_data.empty: st.error("Brak danych"); st.stop()
-    processed_data = add_rolling_features(raw_data)
+    if all_data.empty: st.error("Błąd: Baza danych jest pusta."); st.stop()
+
+    # 2. Filtrujemy wybraną ligę z pamięci RAM (Błyskawicznie)
+    processed_data = all_data[all_data['League'] == selected_league].copy()
+
+    if processed_data.empty: st.warning(f"Brak danych dla ligi: {selected_league}"); st.stop()
+
+    # 3. Trenujemy model tylko na wycinku danych (Szybko)
+    # Modelu nie cache'ujemy globalnie, bo każda liga ma inną specyfikę
     train_mode = "1X2" if bet_type == "Zwycięzca (1X2)" else "OU25"
     model, features = train_model(processed_data, train_mode)
-
 # --- ZAKŁADKI ---
 tab1, tab2, tab3 = st.tabs(["🔥 Skaner Value", "🔍 Analiza Meczu", "📜 Historia"])
 
