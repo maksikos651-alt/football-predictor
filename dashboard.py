@@ -277,6 +277,7 @@ else:
 # TABS
 tab1, tab2, tab3 = st.tabs(["🔥 Skaner", "🔍 Analiza", "📜 Historia"])
 
+# --- TAB 1: SKANER (BEZ GODZINY) ---
 with tab1:
     st.header(f"Skaner: {selected_league}")
     fixtures = get_upcoming_fixtures(selected_league)
@@ -316,7 +317,7 @@ with tab1:
                     val = (p * odd) - 1
                     if val > 0.05:
                         value_bets.append({
-                            "Data": row['Date'].strftime('%d.%m %H:%M'),  # <--- PRZYWRÓCONA DATA
+                            "Data": row['Date'].strftime('%d.%m'),  # <--- ZMIANA: TYLKO DATA
                             "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
                             "Typ": nm, "Kurs": odd, "Szansa": f"{p * 100:.1f}%", "Value": f"{val * 100:.1f}%",
                             "Info": "🔥 GRAJ"
@@ -332,11 +333,11 @@ with tab1:
                 pu = 1.0 - po
                 vo, vu = (po * oo) - 1, (pu * ou) - 1
                 if vo > 0.05: value_bets.append(
-                    {"Data": row['Date'].strftime('%d.%m %H:%M'), "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
+                    {"Data": row['Date'].strftime('%d.%m'), "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
                      "Typ": "OVER 2.5", "Kurs": oo, "Szansa": f"{po * 100:.1f}%", "Value": f"{vo * 100:.1f}%",
                      "Info": "🔥 GRAJ"})
                 if vu > 0.05: value_bets.append(
-                    {"Data": row['Date'].strftime('%d.%m %H:%M'), "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
+                    {"Data": row['Date'].strftime('%d.%m'), "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
                      "Typ": "UNDER 2.5", "Kurs": ou, "Szansa": f"{pu * 100:.1f}%", "Value": f"{vu * 100:.1f}%",
                      "Info": "🔥 GRAJ"})
 
