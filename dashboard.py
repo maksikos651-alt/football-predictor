@@ -203,6 +203,7 @@ def calculate_real_roi(df, bet_type):
         win_amount = 0
 
         for target, prob, odd in outcomes:
+            if odd > 5.00: continue  # Ignorujemy kursy > 5.00 (zbyt ryzykowne)
             val = (prob * odd) - 1
             if val > 0.05:  # Próg 5%
                 stake = calculate_kelly(prob, odd, 1000, 0.1)
