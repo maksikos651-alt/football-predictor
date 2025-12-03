@@ -448,31 +448,98 @@ with tab2:
         c1.pyplot(plot_score_heatmap(xg_h, xg_a))
         c2.info(f"xG: {xg_h:.2f} - {xg_a:.2f}")
 
-# --- TAB 3: HISTORIA ---
+# --- TAB 3: HISTORIA (NAPRAWIONA) ---
 with tab3:
-    st.header("Weryfikacja")
-    history = processed_data.sort_values("Date", ascending=False).head(20).copy()
+    st.header("Weryfikacja Strategii")
+    st.info(f"Pokazuję mecze, w których model widział Value > 5% (zgodnie z ustawieniami Skanera).")
+
+    # Sortujemy od najnowszych
+    history = processed_data.sort_values("Date", ascending=False).head(50).copy()  # Zwiększyłem do 50 meczów
     rows = []
+
     for idx, row in history.iterrows():
+        # 1. Pobieramy cechy bazowe (Forma, Strzały itp.)
         input_dict = {col: row[col] for col in features if col in row}
-        if 'OddsDiff' not in input_dict: input_dict['OddsDiff'] = (1 / row['B365H']) - (1 / row['B365A'])
-        clean = pd.DataFrame([input_dict])[features]
 
-        pick, odd, res = "-", 0.0, "⚪"
+        # 2. NAPRAWA: Obliczamy OddsDiff zależnie od trybu (tak jak w Skanerze!)
+        try:
+            if bet_type == "Zwycięzca (1X2)":
+                if pd.isna(row['B365H']) or pd.isna(row['B365A']): continue
+                input_dict['OddsDiff'] = (1 / row['B365H']) - (1 / row['B365A'])
+            else:
+                if pd.isna(row['B365_O25']) or pd.isna(row['B365_U25']): continue
+                input_dict['OddsDiff'] = (1 / row['B365_O25']) - (1 / row['B365_U25'])
+        except:
+            continue  # Pomijamy błędy dzielenia przez zero
+
+        # 3. Tworzymy input dla modelu
+        clean_input = pd.DataFrame([input_dict])
+        # Upewniamy się, że kolumny są w tej samej kolejności co przy treningu
+        clean_input = clean_input[features]
+
+        pick = "-"
+        played_odd = 0.0
+        val_percent = 0.0
+        res = "⚪"
+        found_bet = False
+
         if bet_type == "Zwycięzca (1X2)":
-            probs = model.predict_proba(clean)[0]
-            if (probs[2] * row['B365H']) - 1 > 0.1:
-                pick = "HOME"; odd = row['B365H']; res = "🟢" if row['FTR'] == 'H' else "🔴"
-            elif (probs[0] * row['B365A']) - 1 > 0.1:
-                pick = "AWAY"; odd = row['B365A']; res = "🟢" if row['FTR'] == 'A' else "🔴"
-        else:
-            po = model.predict_proba(clean)[0][1]
-            if (po * row['B365_O25']) - 1 > 0.1:
-                pick = "OVER"; odd = row['B365_O25']; res = "🟢" if (row['FTHG'] + row['FTAG']) > 2.5 else "🔴"
-            elif ((1 - po) * row['B365_U25']) - 1 > 0.1:
-                pick = "UNDER"; odd = row['B365_U25']; res = "🟢" if (row['FTHG'] + row['FTAG']) < 2.5 else "🔴"
+            probs = model.predict_proba(clean_input)[0]
 
-        rows.append(
-            {"Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}", "Wynik": f"{int(row['FTHG'])}-{int(row['FTAG'])}",
-             "AI": pick, "Kurs": f"{odd:.2f}" if odd > 0 else "-", "Status": res})
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            # Sprawdzamy Home
+            val_h = (probs[2] * row['B365H']) - 1
+            if val_h > 0.05:  # PRÓG 5% (Taki sam jak w Skanerze)
+                pick = "HOME";
+                played_odd = row['B365H'];
+                val_percent = val_h
+                res = "🟢 WIN" if row['FTR'] == 'H' else "🔴 LOSS"
+                found_bet = True
+
+            # Sprawdzamy Away (jeśli Home nie miał value, sprawdzamy Away)
+            elif (probs[0] * row['B365A']) - 1 > 0.05:
+                val_a = (probs[0] * row['B365A']) - 1
+                pick = "AWAY";
+                played_odd = row['B365A'];
+                val_percent = val_a
+                res = "🟢 WIN" if row['FTR'] == 'A' else "🔴 LOSS"
+                found_bet = True
+
+        else:  # Over/Under
+            p_over = model.predict_proba(clean_input)[0][1]
+            p_under = 1.0 - p_over
+            total_goals = row['FTHG'] + row['FTAG']
+
+            # Sprawdzamy Over
+            val_o = (p_over * row['B365_O25']) - 1
+            if val_o > 0.05:
+                pick = "OVER";
+                played_odd = row['B365_O25'];
+                val_percent = val_o
+                res = "🟢 WIN" if total_goals > 2.5 else "🔴 LOSS"
+                found_bet = True
+
+            # Sprawdzamy Under
+            elif ((p_under * row['B365_U25']) - 1) > 0.05:
+                val_u = (p_under * row['B365_U25']) - 1
+                pick = "UNDER";
+                played_odd = row['B365_U25'];
+                val_percent = val_u
+                res = "🟢 WIN" if total_goals < 2.5 else "🔴 LOSS"
+                found_bet = True
+
+        # Dodajemy do tabeli tylko jeśli znaleziono zakład (tak jak Skaner pokazuje tylko okazje)
+        if found_bet:
+            rows.append({
+                "Data": row['Date'].strftime('%d.%m'),
+                "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
+                "Wynik": f"{int(row['FTHG'])}-{int(row['FTAG'])}",
+                "Typ AI": pick,
+                "Kurs": f"{played_odd:.2f}",
+                "Value": f"{val_percent * 100:.1f}%",  # Dodatkowa kolumna weryfikacyjna
+                "Status": res
+            })
+
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    else:
+        st.warning("W ostatnich 50 meczach model nie znalazłby żadnego zakładu spełniającego kryterium Value > 5%.")
