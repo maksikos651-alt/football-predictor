@@ -6,13 +6,12 @@ from sqlalchemy import create_engine
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import poisson
-import plotly.graph_objects as go  # <--- NOWOŚĆ
+import plotly.graph_objects as go
 
-# --- KONFIGURACJA STRONY ---
-st.set_page_config(page_title="Typy Grezegorza", layout="wide", page_icon="⚽")
+st.set_page_config(page_title="AI Football Sniper Dynamic", layout="wide", page_icon="⚽")
 
 
-# --- 1. FUNKCJE SILNIKA (Backend) ---
+# --- 1. FUNKCJE SILNIKA ---
 
 @st.cache_data(ttl=3600)
 def get_upcoming_fixtures(league_name):
@@ -42,24 +41,18 @@ def get_upcoming_fixtures(league_name):
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=86400)  # <--- ZMIANA: Pamięć na 24 godziny!
+@st.cache_data(ttl=86400)
 def load_all_data():
-    """Pobiera całą bazę danych naraz i oblicza statystyki dla wszystkich lig."""
     try:
         db_url = st.secrets["DB_URL"]
         engine = create_engine(db_url)
     except:
-        # Fallback lokalny
-        DB_USER = 'postgres'
-        DB_PASS = 'EAtocepy12!'
-        DB_HOST = 'localhost'
-        engine = create_engine(f'postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:5432/postgres')
+        st.error("Brak secrets.toml!");
+        st.stop()
 
-    # Pobieramy WSZYSTKO (bez filtrowania WHERE league=...)
     query = "SELECT * FROM matches ORDER BY date ASC"
     df = pd.read_sql(query, engine)
 
-    # Zmiana nazw kolumn
     df = df.rename(columns={
         'date': 'Date', 'home_team': 'HomeTeam', 'away_team': 'AwayTeam',
         'home_goals': 'FTHG', 'away_goals': 'FTAG', 'result': 'FTR',
@@ -69,47 +62,9 @@ def load_all_data():
         'home_shots': 'HS', 'away_shots': 'AS',
         'home_yellow': 'HY', 'away_yellow': 'AY',
         'home_fouls': 'HF', 'away_fouls': 'AF',
-        'league': 'League'  # Ważne: zachowujemy kolumnę League do filtrowania później
+        'league': 'League'
     })
-
-    # --- PRZELICZANIE STATYSTYK (ROLLING) DLA CAŁEJ BAZY RAZEM ---
-    # Dzięki temu robimy to raz, a nie przy każdym kliknięciu
-    processed_df = add_rolling_features(df)
-
-    return processed_df
-
-
-def get_h2h_history(df, team1, team2):
-    mask = ((df['HomeTeam'] == team1) & (df['AwayTeam'] == team2)) | \
-           ((df['HomeTeam'] == team2) & (df['AwayTeam'] == team1))
-    h2h = df[mask].sort_values('Date', ascending=False).head(5)
-    return h2h
-
-
-def plot_radar_chart(h_stats, a_stats, home_name, away_name):
-    categories = ['Atak (Gole)', 'Obrona (Stracone)', 'Rożne', 'Strzały (skala /3)', 'Kartki (skala x2)',
-                  'Faule (skala /3)']
-
-    # Skalowanie dla czytelności wykresu
-    h_values = [
-        h_stats['Home_Att'], h_stats['Home_Def'], h_stats['Home_Corners_Avg'],
-        h_stats['Home_Shots_Avg'] / 3, h_stats['Home_Cards_Avg'] * 2, h_stats['Home_Fouls_Avg'] / 3
-    ]
-    a_values = [
-        a_stats['Away_Att'], a_stats['Away_Def'], a_stats['Away_Corners_Avg'],
-        a_stats['Away_Shots_Avg'] / 3, a_stats['Away_Cards_Avg'] * 2, a_stats['Away_Fouls_Avg'] / 3
-    ]
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatterpolar(r=h_values, theta=categories, fill='toself', name=home_name, line_color='blue'))
-    fig.add_trace(go.Scatterpolar(r=a_values, theta=categories, fill='toself', name=away_name, line_color='red'))
-
-    fig.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0, max(max(h_values), max(a_values)) + 1])),
-        margin=dict(l=40, r=40, t=40, b=40),
-        height=400
-    )
-    return fig
+    return add_rolling_features(df)
 
 
 def add_rolling_features(df, window=5):
@@ -179,6 +134,75 @@ def calculate_kelly(prob, odds, bankroll, fraction):
     return bankroll * max(((b * prob - (1 - prob)) / b), 0) * fraction
 
 
+# --- NOWA FUNKCJA DYNAMICZNEGO ROI ---
+def calculate_dynamic_roi(df, model, features, bet_type, last_n=150):
+    recent_games = df.sort_values("Date", ascending=False).head(last_n).copy()
+    profit = 0
+    stakes = 0
+
+    for idx, row in recent_games.iterrows():
+        input_dict = {col: row[col] for col in features if col in row}
+        try:
+            if bet_type == "1X2":
+                if pd.isna(row['B365H']) or pd.isna(row['B365A']): continue
+                input_dict['OddsDiff'] = (1 / row['B365H']) - (1 / row['B365A'])
+            else:
+                if pd.isna(row['B365_O25']) or pd.isna(row['B365_U25']): continue
+                input_dict['OddsDiff'] = (1 / row['B365_O25']) - (1 / row['B365_U25'])
+        except:
+            continue
+
+        clean_input = pd.DataFrame([input_dict])[features]
+
+        if bet_type == "1X2":
+            probs = model.predict_proba(clean_input)[0]
+            outcomes = [(2, probs[2], row['B365H']), (0, probs[0], row['B365A'])]
+        else:
+            p_over = model.predict_proba(clean_input)[0][1]
+            outcomes = [(1, p_over, row['B365_O25']), (0, 1 - p_over, row['B365_U25'])]
+
+        for target, prob, odd in outcomes:
+            if (prob * odd) - 1 > 0.05:  # Value > 5%
+                stake = calculate_kelly(prob, odd, 1000, 0.1)
+                if stake > 0:
+                    stakes += stake
+                    # Check win
+                    if bet_type == "1X2":
+                        real = 2 if row['FTR'] == 'H' else (0 if row['FTR'] == 'A' else 1)
+                    else:
+                        real = 1 if (row['FTHG'] + row['FTAG']) > 2.5 else 0
+
+                    if real == target:
+                        profit += (stake * odd) - stake
+                    else:
+                        profit -= stake
+                    break  # One bet per match
+
+    roi = (profit / stakes * 100) if stakes > 0 else 0.0
+    return roi, len(recent_games)
+
+
+def get_h2h_history(df, team1, team2):
+    mask = ((df['HomeTeam'] == team1) & (df['AwayTeam'] == team2)) | \
+           ((df['HomeTeam'] == team2) & (df['AwayTeam'] == team1))
+    h2h = df[mask].sort_values('Date', ascending=False).head(5)
+    return h2h
+
+
+def plot_radar_chart(h_stats, a_stats, home_name, away_name):
+    categories = ['Atak', 'Obrona', 'Rożne', 'Strzały', 'Kartki', 'Faule']
+    h_values = [h_stats['Home_Att'], h_stats['Home_Def'], h_stats['Home_Corners_Avg'], h_stats['Home_Shots_Avg'] / 3,
+                h_stats['Home_Cards_Avg'] * 2, h_stats['Home_Fouls_Avg'] / 3]
+    a_values = [a_stats['Away_Att'], a_stats['Away_Def'], a_stats['Away_Corners_Avg'], a_stats['Away_Shots_Avg'] / 3,
+                a_stats['Away_Cards_Avg'] * 2, a_stats['Away_Fouls_Avg'] / 3]
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(r=h_values, theta=categories, fill='toself', name=home_name, line_color='blue'))
+    fig.add_trace(go.Scatterpolar(r=a_values, theta=categories, fill='toself', name=away_name, line_color='red'))
+    fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, max(max(h_values), max(a_values)) + 1])),
+                      height=350, margin=dict(l=40, r=40, t=20, b=20))
+    return fig
+
+
 def plot_score_heatmap(home_exp, away_exp):
     probs = np.zeros((5, 5))
     for h in range(5):
@@ -186,77 +210,55 @@ def plot_score_heatmap(home_exp, away_exp):
             probs[a, h] = poisson.pmf(h, home_exp) * poisson.pmf(a, away_exp) * 100
     fig, ax = plt.subplots(figsize=(5, 4))
     sns.heatmap(probs, annot=True, fmt=".1f", cmap="YlGnBu", cbar=False, ax=ax)
-    ax.set_xlabel("Gole Gospodarza")
-    ax.set_ylabel("Gole Gościa")
-    ax.set_title("Dokładny Wynik (%)")
+    ax.set_xlabel("Gospodarz");
+    ax.set_ylabel("Gość");
+    ax.set_title("Dokładny Wynik")
     return fig
 
 
-# --- 2. INTERFEJS GŁÓWNY ---
+# --- 3. UI ---
 
-st.title("⚽ Typy Grzegorza")
+st.title("⚽ AI Football Sniper Dynamic")
 
-# --- PANEL BOCZNY ---
-st.sidebar.header("Ustawienia")
-
-league_config = {
-    "Serie B": {"roi_1x2": 35.46, "roi_ou": 6.29, "recom": "🔥 GRAJ WSZYSTKO"},
-    "Bundesliga": {"roi_1x2": 23.58, "roi_ou": 5.63, "recom": "🔥 GRAJ WSZYSTKO (Nowy Król!)"},
-    "Greece Super League": {"roi_1x2": 15.68, "roi_ou": 34.88, "recom": "🔥 GRAJ WSZYSTKO"},
-    "Championship": {"roi_1x2": 12.55, "roi_ou": 14.51, "recom": "🔥 GRAJ WSZYSTKO"},
-    "Serie A": {"roi_1x2": 13.97, "roi_ou": -4.63, "recom": "✅ GRAJ ZWYCIĘZCĘ (1X2)"},
-    "La Liga 2": {"roi_1x2": 16.89, "roi_ou": 4.25, "recom": "✅ GRAJ ZWYCIĘZCĘ (1X2)"},
-    "Scottish Premiership": {"roi_1x2": 9.43, "roi_ou": -44.03, "recom": "✅ GRAJ ZWYCIĘZCĘ (1X2)"},
-    "Jupiler League": {"roi_1x2": -31.89, "roi_ou": 23.39, "recom": "✅ GRAJ GOLE (O/U)"},
-    "Super Lig": {"roi_1x2": -2.77, "roi_ou": 8.82, "recom": "✅ GRAJ GOLE (O/U)"},
-    "Premier League": {"roi_1x2": -16.94, "roi_ou": -29.05, "recom": "⛔ UNIKAJ (Strata pieniędzy)"},
-    "La Liga": {"roi_1x2": -17.99, "roi_ou": -13.01, "recom": "⛔ UNIKAJ (Za trudna)"},
-    "Ligue 1": {"roi_1x2": -52.57, "roi_ou": -27.77, "recom": "⛔ UNIKAJ"},
-    "Ligue 2": {"roi_1x2": -36.25, "roi_ou": -46.01, "recom": "⛔ UNIKAJ"},
-    "Eredivisie": {"roi_1x2": -11.15, "roi_ou": -30.33, "recom": "⛔ UNIKAJ"},
-    "Liga Portugal": {"roi_1x2": -9.40, "roi_ou": -36.63, "recom": "⛔ UNIKAJ"},
-    "League One": {"roi_1x2": -6.32, "roi_ou": -29.06, "recom": "⛔ UNIKAJ"},
-    "League Two": {"roi_1x2": -15.83, "roi_ou": -6.65, "recom": "⛔ UNIKAJ"},
-    "Bundesliga 2": {"roi_1x2": -0.02, "roi_ou": -33.51, "recom": "⛔ UNIKAJ"},
-}
-
-selected_league = st.sidebar.selectbox("Wybierz Ligę", sorted(list(league_config.keys())))
+# Sidebar Configuration
+st.sidebar.header("Konfiguracja")
+available_leagues = [
+    "Premier League", "Championship", "League One", "League Two",
+    "La Liga", "La Liga 2", "Bundesliga", "Bundesliga 2",
+    "Serie A", "Serie B", "Ligue 1", "Ligue 2",
+    "Eredivisie", "Liga Portugal", "Jupiler League",
+    "Super Lig", "Greece Super League", "Scottish Premiership"
+]
+selected_league = st.sidebar.selectbox("Liga", sorted(available_leagues))
 bet_type = st.sidebar.radio("Strategia", ["Zwycięzca (1X2)", "Gole (Over/Under 2.5)"])
-bankroll = st.sidebar.number_input("Bankroll (PLN)", 1000)
+bankroll = st.sidebar.number_input("Bankroll", 1000)
 kelly_frac = st.sidebar.slider("Kelly %", 0.05, 0.2, 0.1)
 
-cfg = league_config.get(selected_league, {"roi_1x2":0,"roi_ou":0,"recom":"?"})
-st.sidebar.info(f"{cfg['recom']}")
-
-# --- Wklej to, żeby przywrócić ROI ---
-col_roi1, col_roi2 = st.sidebar.columns(2)
-col_roi1.metric("ROI 1X2", f"{cfg['roi_1x2']}%", delta_color="normal" if cfg['roi_1x2'] > 0 else "off")
-col_roi2.metric("ROI O/U", f"{cfg['roi_ou']}%", delta_color="normal" if cfg['roi_ou'] > 0 else "off")
-# -------------------------------------
-# --- OPTYMALIZACJA ŁADOWANIA ---
-with st.spinner("Ładowanie i przetwarzanie danych (to zdarza się raz na 24h)..."):
-    # 1. Pobieramy WSZYSTKO (z Cache)
+# DATA LOADING & TRAINING
+with st.spinner("Przetwarzanie danych..."):
     all_data = load_all_data()
-
-    if all_data.empty: st.error("Błąd: Baza danych jest pusta."); st.stop()
-
-    # 2. Filtrujemy wybraną ligę z pamięci RAM (Błyskawicznie)
+    if all_data.empty: st.error("Błąd bazy"); st.stop()
     processed_data = all_data[all_data['League'] == selected_league].copy()
-
-    if processed_data.empty: st.warning(f"Brak danych dla ligi: {selected_league}"); st.stop()
-
-    # --- POPRAWKA: TWORZYMY KOPIĘ DLA KOMPATYBILNOŚCI ---
-    # Dzięki temu reszta kodu (tabele, listy drużyn) widzi zmienną "raw_data" i nie wyrzuca błędu
     raw_data = processed_data
-    # ----------------------------------------------------
+    if processed_data.empty: st.warning("Brak danych dla ligi"); st.stop()
 
-    # 3. Trenujemy model tylko na wycinku danych (Szybko)
     train_mode = "1X2" if bet_type == "Zwycięzca (1X2)" else "OU25"
     model, features = train_model(processed_data, train_mode)
-# --- ZAKŁADKI ---
-tab1, tab2, tab3 = st.tabs(["🔥 Skaner Value", "🔍 Analiza Meczu", "📜 Historia"])
 
-# --- TAB 1: SKANER ---
+# DYNAMIC ROI CALCULATION
+roi_live, games_count = calculate_dynamic_roi(processed_data, model, features, "1X2" if train_mode == "1X2" else "OU")
+
+st.sidebar.divider()
+st.sidebar.subheader("📊 Dynamiczne ROI")
+st.sidebar.caption(f"Wynik na ostatnich {games_count} meczach:")
+if roi_live > 0:
+    st.sidebar.success(f"📈 +{roi_live:.2f}%")
+else:
+    st.sidebar.error(f"📉 {roi_live:.2f}%")
+
+# TABS
+tab1, tab2, tab3 = st.tabs(["🔥 Skaner", "🔍 Analiza", "📜 Historia"])
+
 with tab1:
     st.header(f"Skaner: {selected_league}")
     fixtures = get_upcoming_fixtures(selected_league)
@@ -271,8 +273,8 @@ with tab1:
             h_stats = processed_data[processed_data['HomeTeam'] == row['HomeTeam']]
             a_stats = processed_data[processed_data['AwayTeam'] == row['AwayTeam']]
             if h_stats.empty or a_stats.empty: continue
-
             h_stat, a_stat = h_stats.iloc[-1], a_stats.iloc[-1]
+
             mi = pd.DataFrame([{
                 'Home_Att': h_stat['Home_Att'], 'Away_Att': a_stat['Away_Att'],
                 'Home_Def': h_stat['Home_Def'], 'Away_Def': a_stat['Away_Def'],
@@ -295,9 +297,8 @@ with tab1:
                 for o, p, odd, nm in [(2, probs[2], o1, row['HomeTeam']), (0, probs[0], o2, row['AwayTeam'])]:
                     val = (p * odd) - 1
                     if val > 0.05: value_bets.append(
-                        {"Data": row['Date'].strftime('%d.%m'), "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
-                         "Typ": nm, "Kurs": odd, "Szansa": f"{p * 100:.1f}%", "Value": f"{val * 100:.1f}%",
-                         "Info": "🔥 GRAJ"})
+                        {"Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}", "Typ": nm, "Kurs": odd,
+                         "Szansa": f"{p * 100:.1f}%", "Value": f"{val * 100:.1f}%"})
             else:
                 oo, ou = row.get('B365>2.5'), row.get('B365<2.5')
                 if pd.isna(oo) or pd.isna(ou): continue
@@ -309,22 +310,20 @@ with tab1:
                 pu = 1.0 - po
                 vo, vu = (po * oo) - 1, (pu * ou) - 1
                 if vo > 0.05: value_bets.append(
-                    {"Data": row['Date'].strftime('%d.%m'), "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
-                     "Typ": "OVER 2.5", "Kurs": oo, "Szansa": f"{po * 100:.1f}%", "Value": f"{vo * 100:.1f}%",
-                     "Info": "🔥 GRAJ"})
+                    {"Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}", "Typ": "OVER 2.5", "Kurs": oo,
+                     "Szansa": f"{po * 100:.1f}%", "Value": f"{vo * 100:.1f}%"})
                 if vu > 0.05: value_bets.append(
-                    {"Data": row['Date'].strftime('%d.%m'), "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
-                     "Typ": "UNDER 2.5", "Kurs": ou, "Szansa": f"{pu * 100:.1f}%", "Value": f"{vu * 100:.1f}%",
-                     "Info": "🔥 GRAJ"})
+                    {"Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}", "Typ": "UNDER 2.5", "Kurs": ou,
+                     "Szansa": f"{pu * 100:.1f}%", "Value": f"{vu * 100:.1f}%"})
+
         progress.empty()
         if value_bets:
             st.dataframe(pd.DataFrame(value_bets), use_container_width=True)
         else:
             st.warning("Brak Value > 5%")
 
-# --- TAB 2: ANALIZA SZCZEGÓŁOWA (ULEPSZONA) ---
 with tab2:
-    st.header("Centrum Analizy Meczu")
+    st.header("Analiza")
     match_opts = ["Wybierz ręcznie..."]
     match_map = {}
     if not fixtures.empty:
@@ -332,8 +331,7 @@ with tab2:
             lbl = f"{row['Date'].strftime('%d.%m')} | {row['HomeTeam']} vs {row['AwayTeam']}"
             match_opts.append(lbl)
             match_map[lbl] = row
-
-    sel_fix = st.selectbox("Wybierz mecz z terminarza", match_opts, key="tab2_select")
+    sel_fix = st.selectbox("Mecz", match_opts, key="t2_sel")
     if "last_fix_t2" not in st.session_state: st.session_state.last_fix_t2 = None
     if sel_fix != st.session_state.last_fix_t2:
         st.session_state.last_fix_t2 = sel_fix
@@ -366,18 +364,13 @@ with tab2:
     home_team = c1.selectbox("Gospodarz", teams, key="t2_h")
     away_team = c2.selectbox("Gość", teams, key="t2_a")
 
-    # H2H
     st.divider()
-    st.subheader("⚔️ Historia H2H")
     h2h_data = get_h2h_history(raw_data, home_team, away_team)
-    if h2h_data.empty:
-        st.info("Brak bezpośrednich meczów.")
-    else:
-        for idx, row in h2h_data.iterrows():
-            st.text(
-                f"{row['Date'].strftime('%d.%m.%Y')} | {row['HomeTeam']} {int(row['FTHG'])} - {int(row['FTAG'])} {row['AwayTeam']}")
+    if not h2h_data.empty:
+        st.caption("Ostatnie mecze H2H:")
+        for idx, row in h2h_data.iterrows(): st.text(
+            f"{row['Date'].strftime('%d.%m')} | {row['HomeTeam']} {int(row['FTHG'])} - {int(row['FTAG'])} {row['AwayTeam']}")
 
-    st.divider()
     st.write("Kursy:")
     k1, k2, k3 = st.columns(3)
     if bet_type == "Zwycięzca (1X2)":
@@ -389,24 +382,19 @@ with tab2:
         ou = k2.number_input("Under", value=1.9, min_value=1.01, step=0.05, key="k_u")
         o1, o2, ox = 0, 0, 0
 
-    if st.button("URUCHOM AI", type="primary", key="btn_ai"):
+    if st.button("ANALIZA", type="primary"):
         h_stat = processed_data[processed_data['HomeTeam'] == home_team].iloc[-1]
         a_stat = processed_data[processed_data['AwayTeam'] == away_team].iloc[-1]
 
-        # WYKRESY
-        st.subheader("📊 Analiza Siły (Radar) i Trendu")
         c_rad, c_line = st.columns(2)
-        with c_rad:
-            st.plotly_chart(plot_radar_chart(h_stat, a_stat, home_team, away_team), use_container_width=True)
-        with c_line:
-            h_vals = processed_data[processed_data['HomeTeam'] == home_team].tail(10)['Home_Form'].values
-            a_vals = processed_data[processed_data['AwayTeam'] == away_team].tail(10)['Away_Form'].values
-            min_len = min(len(h_vals), len(a_vals))
-            if min_len > 1:
-                chart_df = pd.DataFrame({f"{home_team}": h_vals[-min_len:], f"{away_team}": a_vals[-min_len:]})
-                chart_df.index = range(1, min_len + 1)
-                st.line_chart(chart_df)
-                st.caption("Oś X: Mecze (10 = ostatni)")
+        c_rad.plotly_chart(plot_radar_chart(h_stat, a_stat, home_team, away_team), use_container_width=True)
+        h_vals = processed_data[processed_data['HomeTeam'] == home_team].tail(10)['Home_Form'].values
+        a_vals = processed_data[processed_data['AwayTeam'] == away_team].tail(10)['Away_Form'].values
+        min_len = min(len(h_vals), len(a_vals))
+        if min_len > 1:
+            chart = pd.DataFrame({f"{home_team}": h_vals[-min_len:], f"{away_team}": a_vals[-min_len:]})
+            chart.index = range(1, min_len + 1)
+            c_line.line_chart(chart)
 
         input_data = pd.DataFrame([{
             'Home_Att': h_stat['Home_Att'], 'Away_Att': a_stat['Away_Att'],
@@ -419,7 +407,7 @@ with tab2:
         }])
 
         if bet_type == "Zwycięzca (1X2)":
-            input_data['OddsDiff'] = (1 / o1) - (1 / o2)
+            input_data['OddsDiff'] = (1 / o1) - (1 / o2);
             input_data['B365H'] = o1;
             input_data['B365D'] = ox;
             input_data['B365A'] = o2
@@ -427,40 +415,31 @@ with tab2:
             probs = model.predict_proba(input_data)[0]
             outcomes = [("1", probs[2], o1), ("X", probs[1], ox), ("2", probs[0], o2)]
         else:
-            input_data['OddsDiff'] = (1 / oo) - (1 / ou)
+            input_data['OddsDiff'] = (1 / oo) - (1 / ou);
             input_data['B365_O25'] = oo;
             input_data['B365_U25'] = ou
             input_data = input_data[features]
-            p_over = model.predict_proba(input_data)[0][1]
-            outcomes = [("Over", p_over, oo), ("Under", 1 - p_over, ou)]
+            po = model.predict_proba(input_data)[0][1]
+            outcomes = [("Over", po, oo), ("Under", 1 - po, ou)]
 
-        cols = st.columns(len(outcomes))
+        c_res = st.columns(len(outcomes))
         for i, (lbl, p, o) in enumerate(outcomes):
-            with cols[i]:
+            with c_res[i]:
                 val = (p * o) - 1
                 st.metric(lbl, f"{p * 100:.1f}%", f"Val: {val * 100:.1f}%", delta_color="normal" if val > 0 else "off")
                 if val > 0.05: st.success(f"Stawka: {calculate_kelly(p, o, bankroll, kelly_frac):.2f}")
 
-        st.divider()
         xg_h = (h_stat['Home_Att'] + a_stat['Away_Def']) / 2
         xg_a = (a_stat['Away_Att'] + h_stat['Home_Def']) / 2
-        c1, c2 = st.columns([2, 1])
-        c1.pyplot(plot_score_heatmap(xg_h, xg_a))
-        c2.info(f"xG: {xg_h:.2f} - {xg_a:.2f}")
+        st.pyplot(plot_score_heatmap(xg_h, xg_a))
+        st.info(f"xG: {xg_h:.2f} - {xg_a:.2f}")
 
-# --- TAB 3: HISTORIA (TRANSPARENTNA) ---
 with tab3:
-    st.header("Weryfikacja Strategii")
-    st.info("Pokazuję wszystkie ostatnie mecze. Jeśli Value > 5%, system uznaje to za sygnał.")
-
-    # Pobieramy 20 ostatnich
-    history = processed_data.sort_values("Date", ascending=False).head(20).copy()
+    st.header("Historia (Wszystkie sygnały)")
+    history = processed_data.sort_values("Date", ascending=False).head(50).copy()
     rows = []
-
     for idx, row in history.iterrows():
         input_dict = {col: row[col] for col in features if col in row}
-
-        # Obsługa OddsDiff
         try:
             if bet_type == "Zwycięzca (1X2)":
                 if pd.isna(row['B365H']) or pd.isna(row['B365A']): continue
@@ -470,72 +449,27 @@ with tab3:
                 input_dict['OddsDiff'] = (1 / row['B365_O25']) - (1 / row['B365_U25'])
         except:
             continue
+        clean = pd.DataFrame([input_dict])[features]
 
-        clean_input = pd.DataFrame([input_dict])[features]
-
-        pick = "PAS"
-        played_odd = 0.0
-        val_percent = 0.0
-        res = "⚪"  # Neutralny kolor
-
+        pick, odd, val_perc, res = "PAS", 0.0, 0.0, "⚪"
         if bet_type == "Zwycięzca (1X2)":
-            probs = model.predict_proba(clean_input)[0]
-
-            # Obliczamy value dla wszystkich opcji
-            val_h = (probs[2] * row['B365H']) - 1
-            val_a = (probs[0] * row['B365A']) - 1
-
-            # Wybieramy najlepszą opcję (nawet jeśli słabą)
-            if val_h > val_a:
-                best_val = val_h
-                temp_pick = "HOME"
-                temp_odd = row['B365H']
-                match_res = "WIN" if row['FTR'] == 'H' else "LOSS"
-            else:
-                best_val = val_a
-                temp_pick = "AWAY"
-                temp_odd = row['B365A']
-                match_res = "WIN" if row['FTR'] == 'A' else "LOSS"
-
-        else:  # Over/Under
-            p_over = model.predict_proba(clean_input)[0][1]
-            total_goals = row['FTHG'] + row['FTAG']
-
-            val_o = (p_over * row['B365_O25']) - 1
-            val_u = ((1 - p_over) * row['B365_U25']) - 1
-
-            if val_o > val_u:
-                best_val = val_o
-                temp_pick = "OVER"
-                temp_odd = row['B365_O25']
-                match_res = "WIN" if total_goals > 2.5 else "LOSS"
-            else:
-                best_val = val_u
-                temp_pick = "UNDER"
-                temp_odd = row['B365_U25']
-                match_res = "WIN" if total_goals < 2.5 else "LOSS"
-
-        # --- DECYZJA KOŃCOWA ---
-        val_percent = best_val
-
-        # Pokazujemy typ tylko jeśli przekracza próg 5%
-        if best_val > 0.05:
-            pick = temp_pick
-            played_odd = temp_odd
-            res = "🟢 TRAF" if match_res == "WIN" else "🔴 PUDŁO"
+            probs = model.predict_proba(clean)[0]
+            vh = (probs[2] * row['B365H']) - 1;
+            va = (probs[0] * row['B365A']) - 1
+            if vh > 0.05:
+                pick = "HOME"; odd = row['B365H']; val_perc = vh; res = "🟢" if row['FTR'] == 'H' else "🔴"
+            elif va > 0.05:
+                pick = "AWAY"; odd = row['B365A']; val_perc = va; res = "🟢" if row['FTR'] == 'A' else "🔴"
         else:
-            # Jeśli brak value, pokazujemy co by wybrał, ale na szaro
-            pick = f"({temp_pick})"
-            res = "⚪ BRAK VALUE"
+            po = model.predict_proba(clean)[0][1]
+            vo = (po * row['B365_O25']) - 1;
+            vu = ((1 - po) * row['B365_U25']) - 1
+            gls = row['FTHG'] + row['FTAG']
+            if vo > 0.05:
+                pick = "OVER"; odd = row['B365_O25']; val_perc = vo; res = "🟢" if gls > 2.5 else "🔴"
+            elif vu > 0.05:
+                pick = "UNDER"; odd = row['B365_U25']; val_perc = vu; res = "🟢" if gls < 2.5 else "🔴"
 
-        rows.append({
-            "Data": row['Date'].strftime('%d.%m'),
-            "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
-            "Wynik": f"{int(row['FTHG'])}-{int(row['FTAG'])}",
-            "AI Sugeruje": pick,
-            "Kurs": f"{temp_odd:.2f}",
-            "Value": f"{val_percent * 100:.1f}%",  # Zobaczysz dokładnie ile wyszło!
-            "Status": res
-        })
-
+        rows.append({"Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}", "AI": pick, "Kurs": f"{odd:.2f}",
+                     "Value": f"{val_perc * 100:.1f}%", "Status": res})
     st.dataframe(pd.DataFrame(rows), use_container_width=True)
