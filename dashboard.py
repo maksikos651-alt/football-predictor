@@ -8,7 +8,7 @@ import seaborn as sns
 from scipy.stats import poisson
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="AI Football Sniper Dynamic", layout="wide", page_icon="⚽")
+st.set_page_config(page_title="AI Football Sniper Ultimate", layout="wide", page_icon="⚽")
 
 
 # --- 1. FUNKCJE SILNIKA ---
@@ -134,48 +134,30 @@ def calculate_kelly(prob, odds, bankroll, fraction):
     return bankroll * max(((b * prob - (1 - prob)) / b), 0) * fraction
 
 
-# --- NOWA FUNKCJA DYNAMICZNEGO ROI ---
+# --- FUNKCJA ROI (Z LIMITEM KURSOWYM) ---
 def calculate_real_roi(df, bet_type):
-    """
-    Oblicza UCZCIWE ROI, trenując model na przeszłości (80%)
-    i testując na przyszłości (20%).
-    """
-    # Musimy mieć minimum danych, żeby to miało sens
     if len(df) < 100: return 0.0, 0
-
-    # 1. Sortujemy chronologicznie
     df = df.sort_values("Date")
-
-    # 2. Dzielimy na Trening (80%) i Test (20%)
     split_idx = int(len(df) * 0.80)
     train_df = df.iloc[:split_idx]
     test_df = df.iloc[split_idx:].copy()
 
-    # 3. Trenujemy OSOBNY, tymczasowy model tylko na starej części
-    # (Dzięki temu model nie zna wyników meczów, które obstawia)
     features = ['OddsDiff', 'Home_Att', 'Away_Att', 'Home_Def', 'Away_Def', 'Home_Form', 'Away_Form',
                 'Home_Corners_Avg', 'Away_Corners_Avg', 'Home_Shots_Avg', 'Away_Shots_Avg', 'Home_Cards_Avg',
                 'Away_Cards_Avg', 'Home_Fouls_Avg', 'Away_Fouls_Avg']
-
     temp_model = xgb.XGBClassifier(n_estimators=150, learning_rate=0.02, max_depth=3, n_jobs=1)
 
     if bet_type == "1X2":
-        # Trening
         target = train_df['FTR'].map({'A': 0, 'D': 1, 'H': 2})
-        cols = features + ['B365H', 'B365A', 'B365D']
         temp_model.fit(train_df[features], target)
     else:
-        # Trening O/U
         target = np.where((train_df['FTHG'] + train_df['FTAG']) > 2.5, 1, 0)
         temp_model.fit(train_df[features], target)
 
-    # 4. Symulacja na części TESTOWEJ (ostatnie 20%)
-    bankroll = 1000.0
     stakes_sum = 0
     profit = 0
 
     for idx, row in test_df.iterrows():
-        # Rekonstrukcja danych (tak jak w historii)
         input_dict = {col: row[col] for col in features if col in row}
         try:
             if bet_type == "1X2":
@@ -189,41 +171,32 @@ def calculate_real_roi(df, bet_type):
 
         clean_input = pd.DataFrame([input_dict])[features]
 
-        # Predykcja
         if bet_type == "1X2":
             probs = temp_model.predict_proba(clean_input)[0]
-            outcomes = [(2, probs[2], row['B365H']), (0, probs[0], row['B365A'])]  # Home, Away
+            outcomes = [(2, probs[2], row['B365H']), (0, probs[0], row['B365A'])]
         else:
             p_over = temp_model.predict_proba(clean_input)[0][1]
-            outcomes = [(1, p_over, row['B365_O25']), (0, 1 - p_over, row['B365_U25'])]  # Over, Under
-
-        # Szukamy Value
-        best_val = 0
-        final_stake = 0
-        win_amount = 0
+            outcomes = [(1, p_over, row['B365_O25']), (0, 1 - p_over, row['B365_U25'])]
 
         for target, prob, odd in outcomes:
-            if odd > 5.00: continue  # Ignorujemy kursy > 5.00 (zbyt ryzykowne)
-            val = (prob * odd) - 1
-            if val > 0.05:  # Próg 5%
+            # --- LIMIT KURSOWY ---
+            if odd > 5.00: continue
+            # ---------------------
+
+            if (prob * odd) - 1 > 0.05:
                 stake = calculate_kelly(prob, odd, 1000, 0.1)
                 if stake > 0:
-                    final_stake = stake
-                    # Sprawdzamy czy weszło
+                    stakes_sum += stake
                     if bet_type == "1X2":
                         real = 2 if row['FTR'] == 'H' else (0 if row['FTR'] == 'A' else 1)
                     else:
                         real = 1 if (row['FTHG'] + row['FTAG']) > 2.5 else 0
 
                     if real == target:
-                        win_amount = (stake * odd) - stake
+                        profit += (stake * odd) - stake
                     else:
-                        win_amount = -stake
-                    break  # Gramy tylko 1 typ na mecz
-
-        if final_stake > 0:
-            stakes_sum += final_stake
-            profit += win_amount
+                        profit -= stake
+                    break
 
     roi = (profit / stakes_sum * 100) if stakes_sum > 0 else 0.0
     return roi, len(test_df)
@@ -265,9 +238,8 @@ def plot_score_heatmap(home_exp, away_exp):
 
 # --- 3. UI ---
 
-st.title("⚽ AI Football Sniper Dynamic")
+st.title("⚽ AI Football Sniper Ultimate")
 
-# Sidebar Configuration
 st.sidebar.header("Konfiguracja")
 available_leagues = [
     "Premier League", "Championship", "League One", "League Two",
@@ -281,7 +253,6 @@ bet_type = st.sidebar.radio("Strategia", ["Zwycięzca (1X2)", "Gole (Over/Under 
 bankroll = st.sidebar.number_input("Bankroll", 1000)
 kelly_frac = st.sidebar.slider("Kelly %", 0.05, 0.2, 0.1)
 
-# DATA LOADING & TRAINING
 with st.spinner("Przetwarzanie danych..."):
     all_data = load_all_data()
     if all_data.empty: st.error("Błąd bazy"); st.stop()
@@ -292,14 +263,12 @@ with st.spinner("Przetwarzanie danych..."):
     train_mode = "1X2" if bet_type == "Zwycięzca (1X2)" else "OU25"
     model, features = train_model(processed_data, train_mode)
 
-# DYNAMIC ROI CALCULATION
-# --- ROI JEST TERAZ LICZONE NA OSOBNYM ZBIORZE TESTOWYM (BEZ OSZUKIWANIA) ---
+# ROI Calculation
 roi_live, games_count = calculate_real_roi(processed_data, "1X2" if bet_type == "Zwycięzca (1X2)" else "OU")
 
 st.sidebar.divider()
 st.sidebar.subheader("📊 Uczciwe ROI (Backtest)")
-st.sidebar.caption(f"Wynik z ostatnich {games_count} meczów (których model nie widział podczas treningu):")
-
+st.sidebar.caption(f"Wynik z ostatnich {games_count} meczów:")
 if roi_live > 0:
     st.sidebar.success(f"📈 +{roi_live:.2f}%")
 else:
@@ -345,9 +314,13 @@ with tab1:
                 probs = model.predict_proba(mi)[0]
                 for o, p, odd, nm in [(2, probs[2], o1, row['HomeTeam']), (0, probs[0], o2, row['AwayTeam'])]:
                     val = (p * odd) - 1
-                    if val > 0.05: value_bets.append(
-                        {"Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}", "Typ": nm, "Kurs": odd,
-                         "Szansa": f"{p * 100:.1f}%", "Value": f"{val * 100:.1f}%"})
+                    if val > 0.05:
+                        value_bets.append({
+                            "Data": row['Date'].strftime('%d.%m %H:%M'),  # <--- PRZYWRÓCONA DATA
+                            "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
+                            "Typ": nm, "Kurs": odd, "Szansa": f"{p * 100:.1f}%", "Value": f"{val * 100:.1f}%",
+                            "Info": "🔥 GRAJ"
+                        })
             else:
                 oo, ou = row.get('B365>2.5'), row.get('B365<2.5')
                 if pd.isna(oo) or pd.isna(ou): continue
@@ -359,11 +332,13 @@ with tab1:
                 pu = 1.0 - po
                 vo, vu = (po * oo) - 1, (pu * ou) - 1
                 if vo > 0.05: value_bets.append(
-                    {"Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}", "Typ": "OVER 2.5", "Kurs": oo,
-                     "Szansa": f"{po * 100:.1f}%", "Value": f"{vo * 100:.1f}%"})
+                    {"Data": row['Date'].strftime('%d.%m %H:%M'), "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
+                     "Typ": "OVER 2.5", "Kurs": oo, "Szansa": f"{po * 100:.1f}%", "Value": f"{vo * 100:.1f}%",
+                     "Info": "🔥 GRAJ"})
                 if vu > 0.05: value_bets.append(
-                    {"Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}", "Typ": "UNDER 2.5", "Kurs": ou,
-                     "Szansa": f"{pu * 100:.1f}%", "Value": f"{vu * 100:.1f}%"})
+                    {"Data": row['Date'].strftime('%d.%m %H:%M'), "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
+                     "Typ": "UNDER 2.5", "Kurs": ou, "Szansa": f"{pu * 100:.1f}%", "Value": f"{vu * 100:.1f}%",
+                     "Info": "🔥 GRAJ"})
 
         progress.empty()
         if value_bets:
@@ -418,7 +393,7 @@ with tab2:
     if not h2h_data.empty:
         st.caption("Ostatnie mecze H2H:")
         for idx, row in h2h_data.iterrows(): st.text(
-            f"{row['Date'].strftime('%d.%m')} | {row['HomeTeam']} {int(row['FTHG'])} - {int(row['FTAG'])} {row['AwayTeam']}")
+            f"{row['Date'].strftime('%d.%m.%Y')} | {row['HomeTeam']} {int(row['FTHG'])} - {int(row['FTAG'])} {row['AwayTeam']}")
 
     st.write("Kursy:")
     k1, k2, k3 = st.columns(3)
@@ -483,58 +458,52 @@ with tab2:
         st.pyplot(plot_score_heatmap(xg_h, xg_a))
         st.info(f"xG: {xg_h:.2f} - {xg_a:.2f}")
 
-# --- TAB 3: HISTORIA (UCZCIWA WERYFIKACJA) ---
 with tab3:
-    st.header("Weryfikacja (Backtest na ostatnich 50 meczach)")
-    st.info("Symulacja: Model został wytrenowany na danych SPRZED tych 50 meczów. Nie znał ich wyników.")
+    st.header("Historia (Bez oszukiwania)")
+    st.info("Test na danych historycznych - model nie znał wyników przed obstawieniem.")
 
-    # 1. Przygotowanie danych (sortowanie chronologiczne)
+    # Sortujemy chronologicznie
     df_sorted = processed_data.sort_values("Date", ascending=True)
 
-    # Zabezpieczenie - musimy mieć na czym trenować
     if len(df_sorted) < 100:
-        st.warning("Za mało danych w bazie, by przeprowadzić uczciwy test (potrzeba min. 100 meczów historycznych).")
+        st.warning("Za mało danych historycznych.")
     else:
-        # 2. Podział: Ostatnie 50 to TEST, reszta to TRENING
         test_size = 50
         train_df = df_sorted.iloc[:-test_size]
-        test_df = df_sorted.iloc[-test_size:].copy()  # To są te mecze, które pokażemy w tabeli
+        test_df = df_sorted.iloc[-test_size:].copy()
 
-        # 3. Trening modelu "Historycznego" (który nie zna przyszłości)
-        # Używamy lekkich parametrów (n_estimators=150), żeby było szybko
-        history_model = xgb.XGBClassifier(n_estimators=150, learning_rate=0.02, max_depth=3, n_jobs=1)
+        # Osobny model historyczny
+        hist_model = xgb.XGBClassifier(n_estimators=150, learning_rate=0.02, max_depth=3, n_jobs=1)
 
         if bet_type == "Zwycięzca (1X2)":
             target = train_df['FTR'].map({'A': 0, 'D': 1, 'H': 2})
-            history_model.fit(train_df[features], target)
+            hist_model.fit(train_df[features], target)
         else:
             target = np.where((train_df['FTHG'] + train_df['FTAG']) > 2.5, 1, 0)
-            history_model.fit(train_df[features], target)
+            hist_model.fit(train_df[features], target)
 
-        # 4. Predykcja na zbiorze testowym (odwracamy kolejność, żeby najnowsze były na górze)
         rows = []
-        # Sortujemy test_df od najnowszych do wyświetlania
+        # Odwracamy test_df żeby najnowsze były na górze tabeli
         test_view = test_df.sort_values("Date", ascending=False)
 
         for idx, row in test_view.iterrows():
             input_dict = {col: row[col] for col in features if col in row}
             try:
                 if bet_type == "Zwycięzca (1X2)":
-                    if pd.isna(row['B365H']) or pd.isna(row['B365A']): continue
+                    if pd.isna(row['B365H']): continue
                     input_dict['OddsDiff'] = (1 / row['B365H']) - (1 / row['B365A'])
                 else:
-                    if pd.isna(row['B365_O25']) or pd.isna(row['B365_U25']): continue
+                    if pd.isna(row['B365_O25']): continue
                     input_dict['OddsDiff'] = (1 / row['B365_O25']) - (1 / row['B365_U25'])
             except:
                 continue
-
             clean = pd.DataFrame([input_dict])[features]
 
             pick, odd, val_perc, res = "PAS", 0.0, 0.0, "⚪"
 
             if bet_type == "Zwycięzca (1X2)":
-                probs = history_model.predict_proba(clean)[0]
-                vh = (probs[2] * row['B365H']) - 1
+                probs = hist_model.predict_proba(clean)[0]
+                vh = (probs[2] * row['B365H']) - 1;
                 va = (probs[0] * row['B365A']) - 1
 
                 if vh > 0.05:
@@ -548,8 +517,8 @@ with tab3:
                     val_perc = va;
                     res = "🟢 WIN" if row['FTR'] == 'A' else "🔴 LOSS"
             else:
-                po = history_model.predict_proba(clean)[0][1]
-                vo = (po * row['B365_O25']) - 1
+                po = hist_model.predict_proba(clean)[0][1]
+                vo = (po * row['B365_O25']) - 1;
                 vu = ((1 - po) * row['B365_U25']) - 1
                 gls = row['FTHG'] + row['FTAG']
 
@@ -564,19 +533,11 @@ with tab3:
                     val_perc = vu;
                     res = "🟢 WIN" if gls < 2.5 else "🔴 LOSS"
 
-            # Dodajemy tylko jeśli była decyzja (żeby nie śmiecić tabeli PAS-ami)
             if pick != "PAS":
-                rows.append({
-                    "Data": row['Date'].strftime('%d.%m'),
-                    "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
-                    "Wynik": f"{int(row['FTHG'])}-{int(row['FTAG'])}" if pd.notnull(row['FTHG']) else "?-?",
-                    "AI": pick,
-                    "Kurs": f"{odd:.2f}",
-                    "Value": f"{val_perc * 100:.1f}%",
-                    "Status": res
-                })
+                # Bezpieczne pobieranie wyniku
+                score_str = f"{int(row['FTHG'])}-{int(row['FTAG'])}" if pd.notnull(row['FTHG']) else "?-?"
+                rows.append({"Data": row['Date'].strftime('%d.%m'), "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
+                             "Wynik": score_str, "AI": pick, "Kurs": f"{odd:.2f}", "Value": f"{val_perc * 100:.1f}%",
+                             "Status": res})
 
-        if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
-        else:
-            st.warning("Model historyczny nie znalazłby żadnej okazji > 5% Value w ostatnich 50 meczach.")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
