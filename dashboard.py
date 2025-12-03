@@ -448,20 +448,19 @@ with tab2:
         c1.pyplot(plot_score_heatmap(xg_h, xg_a))
         c2.info(f"xG: {xg_h:.2f} - {xg_a:.2f}")
 
-# --- TAB 3: HISTORIA (NAPRAWIONA) ---
+# --- TAB 3: HISTORIA (TRANSPARENTNA) ---
 with tab3:
     st.header("Weryfikacja Strategii")
-    st.info(f"Pokazuję mecze, w których model widział Value > 5% (zgodnie z ustawieniami Skanera).")
+    st.info("Pokazuję wszystkie ostatnie mecze. Jeśli Value > 5%, system uznaje to za sygnał.")
 
-    # Sortujemy od najnowszych
-    history = processed_data.sort_values("Date", ascending=False).head(50).copy()  # Zwiększyłem do 50 meczów
+    # Pobieramy 20 ostatnich
+    history = processed_data.sort_values("Date", ascending=False).head(20).copy()
     rows = []
 
     for idx, row in history.iterrows():
-        # 1. Pobieramy cechy bazowe (Forma, Strzały itp.)
         input_dict = {col: row[col] for col in features if col in row}
 
-        # 2. NAPRAWA: Obliczamy OddsDiff zależnie od trybu (tak jak w Skanerze!)
+        # Obsługa OddsDiff
         try:
             if bet_type == "Zwycięzca (1X2)":
                 if pd.isna(row['B365H']) or pd.isna(row['B365A']): continue
@@ -470,76 +469,73 @@ with tab3:
                 if pd.isna(row['B365_O25']) or pd.isna(row['B365_U25']): continue
                 input_dict['OddsDiff'] = (1 / row['B365_O25']) - (1 / row['B365_U25'])
         except:
-            continue  # Pomijamy błędy dzielenia przez zero
+            continue
 
-        # 3. Tworzymy input dla modelu
-        clean_input = pd.DataFrame([input_dict])
-        # Upewniamy się, że kolumny są w tej samej kolejności co przy treningu
-        clean_input = clean_input[features]
+        clean_input = pd.DataFrame([input_dict])[features]
 
-        pick = "-"
+        pick = "PAS"
         played_odd = 0.0
         val_percent = 0.0
-        res = "⚪"
-        found_bet = False
+        res = "⚪"  # Neutralny kolor
 
         if bet_type == "Zwycięzca (1X2)":
             probs = model.predict_proba(clean_input)[0]
 
-            # Sprawdzamy Home
+            # Obliczamy value dla wszystkich opcji
             val_h = (probs[2] * row['B365H']) - 1
-            if val_h > 0.05:  # PRÓG 5% (Taki sam jak w Skanerze)
-                pick = "HOME";
-                played_odd = row['B365H'];
-                val_percent = val_h
-                res = "🟢 WIN" if row['FTR'] == 'H' else "🔴 LOSS"
-                found_bet = True
+            val_a = (probs[0] * row['B365A']) - 1
 
-            # Sprawdzamy Away (jeśli Home nie miał value, sprawdzamy Away)
-            elif (probs[0] * row['B365A']) - 1 > 0.05:
-                val_a = (probs[0] * row['B365A']) - 1
-                pick = "AWAY";
-                played_odd = row['B365A'];
-                val_percent = val_a
-                res = "🟢 WIN" if row['FTR'] == 'A' else "🔴 LOSS"
-                found_bet = True
+            # Wybieramy najlepszą opcję (nawet jeśli słabą)
+            if val_h > val_a:
+                best_val = val_h
+                temp_pick = "HOME"
+                temp_odd = row['B365H']
+                match_res = "WIN" if row['FTR'] == 'H' else "LOSS"
+            else:
+                best_val = val_a
+                temp_pick = "AWAY"
+                temp_odd = row['B365A']
+                match_res = "WIN" if row['FTR'] == 'A' else "LOSS"
 
         else:  # Over/Under
             p_over = model.predict_proba(clean_input)[0][1]
-            p_under = 1.0 - p_over
             total_goals = row['FTHG'] + row['FTAG']
 
-            # Sprawdzamy Over
             val_o = (p_over * row['B365_O25']) - 1
-            if val_o > 0.05:
-                pick = "OVER";
-                played_odd = row['B365_O25'];
-                val_percent = val_o
-                res = "🟢 WIN" if total_goals > 2.5 else "🔴 LOSS"
-                found_bet = True
+            val_u = ((1 - p_over) * row['B365_U25']) - 1
 
-            # Sprawdzamy Under
-            elif ((p_under * row['B365_U25']) - 1) > 0.05:
-                val_u = (p_under * row['B365_U25']) - 1
-                pick = "UNDER";
-                played_odd = row['B365_U25'];
-                val_percent = val_u
-                res = "🟢 WIN" if total_goals < 2.5 else "🔴 LOSS"
-                found_bet = True
+            if val_o > val_u:
+                best_val = val_o
+                temp_pick = "OVER"
+                temp_odd = row['B365_O25']
+                match_res = "WIN" if total_goals > 2.5 else "LOSS"
+            else:
+                best_val = val_u
+                temp_pick = "UNDER"
+                temp_odd = row['B365_U25']
+                match_res = "WIN" if total_goals < 2.5 else "LOSS"
 
-        # Dodajemy do tabeli tylko jeśli znaleziono zakład (tak jak Skaner pokazuje tylko okazje)
-        if found_bet:
-            rows.append({
-                "Data": row['Date'].strftime('%d.%m'),
-                "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
-                "Wynik": f"{int(row['FTHG'])}-{int(row['FTAG'])}",
-                "Typ AI": pick,
-                "Kurs": f"{played_odd:.2f}",
-                "Value": f"{val_percent * 100:.1f}%",  # Dodatkowa kolumna weryfikacyjna
-                "Status": res
-            })
+        # --- DECYZJA KOŃCOWA ---
+        val_percent = best_val
 
-    if rows:
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
-    else:
-        st.warning("W ostatnich 50 meczach model nie znalazłby żadnego zakładu spełniającego kryterium Value > 5%.")
+        # Pokazujemy typ tylko jeśli przekracza próg 5%
+        if best_val > 0.05:
+            pick = temp_pick
+            played_odd = temp_odd
+            res = "🟢 TRAF" if match_res == "WIN" else "🔴 PUDŁO"
+        else:
+            # Jeśli brak value, pokazujemy co by wybrał, ale na szaro
+            pick = f"({temp_pick})"
+            res = "⚪ BRAK VALUE"
+
+        rows.append({
+            "Data": row['Date'].strftime('%d.%m'),
+            "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
+            "Wynik": f"{int(row['FTHG'])}-{int(row['FTAG'])}",
+            "AI Sugeruje": pick,
+            "Kurs": f"{temp_odd:.2f}",
+            "Value": f"{val_percent * 100:.1f}%",  # Zobaczysz dokładnie ile wyszło!
+            "Status": res
+        })
+
+    st.dataframe(pd.DataFrame(rows), use_container_width=True)
