@@ -482,86 +482,100 @@ with tab2:
         st.pyplot(plot_score_heatmap(xg_h, xg_a))
         st.info(f"xG: {xg_h:.2f} - {xg_a:.2f}")
 
-# --- TAB 3: HISTORIA (Z WYNIKIEM) ---
+# --- TAB 3: HISTORIA (UCZCIWA WERYFIKACJA) ---
 with tab3:
-    st.header("Weryfikacja Strategii")
-    st.info("Pokazuję ostatnie mecze i decyzje systemu (Value > 5%).")
+    st.header("Weryfikacja (Backtest na ostatnich 50 meczach)")
+    st.info("Symulacja: Model został wytrenowany na danych SPRZED tych 50 meczów. Nie znał ich wyników.")
 
-    # Sortujemy od najnowszych
-    history = processed_data.sort_values("Date", ascending=False).head(50).copy()
-    rows = []
+    # 1. Przygotowanie danych (sortowanie chronologiczne)
+    df_sorted = processed_data.sort_values("Date", ascending=True)
 
-    for idx, row in history.iterrows():
-        input_dict = {col: row[col] for col in features if col in row}
-
-        # Zabezpieczenie OddsDiff
-        try:
-            if bet_type == "Zwycięzca (1X2)":
-                if pd.isna(row['B365H']) or pd.isna(row['B365A']): continue
-                input_dict['OddsDiff'] = (1 / row['B365H']) - (1 / row['B365A'])
-            else:
-                if pd.isna(row['B365_O25']) or pd.isna(row['B365_U25']): continue
-                input_dict['OddsDiff'] = (1 / row['B365_O25']) - (1 / row['B365_U25'])
-        except:
-            continue
-
-        clean_input = pd.DataFrame([input_dict])[features]
-
-        pick = "PAS"
-        played_odd = 0.0
-        val_percent = 0.0
-        res = "⚪"
-
-        # Logika decyzji (taka sama jak w Skanerze)
-        if bet_type == "Zwycięzca (1X2)":
-            probs = model.predict_proba(clean_input)[0]
-            val_h = (probs[2] * row['B365H']) - 1
-            val_a = (probs[0] * row['B365A']) - 1
-
-            if val_h > 0.05:
-                pick = "HOME";
-                played_odd = row['B365H'];
-                val_percent = val_h
-                res = "🟢 WIN" if row['FTR'] == 'H' else "🔴 LOSS"
-            elif val_a > 0.05:
-                pick = "AWAY";
-                played_odd = row['B365A'];
-                val_percent = val_a
-                res = "🟢 WIN" if row['FTR'] == 'A' else "🔴 LOSS"
-
-        else:  # Over/Under
-            p_over = model.predict_proba(clean_input)[0][1]
-            p_under = 1.0 - p_over
-            total_goals = row['FTHG'] + row['FTAG']
-
-            val_o = (p_over * row['B365_O25']) - 1
-            val_u = (p_under * row['B365_U25']) - 1
-
-            if val_o > 0.05:
-                pick = "OVER";
-                played_odd = row['B365_O25'];
-                val_percent = val_o
-                res = "🟢 WIN" if total_goals > 2.5 else "🔴 LOSS"
-            elif val_u > 0.05:
-                pick = "UNDER";
-                played_odd = row['B365_U25'];
-                val_percent = val_u
-                res = "🟢 WIN" if total_goals < 2.5 else "🔴 LOSS"
-
-        # Dodajemy wiersz tylko jeśli była jakaś akcja (pick != PAS)
-        # LUB jeśli chcesz widzieć wszystko, usuń 'if pick != "PAS":'
-        if pick != "PAS":
-            rows.append({
-                "Data": row['Date'].strftime('%d.%m'),
-                "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
-                "Wynik": f"{int(row['FTHG'])}-{int(row['FTAG'])}",  # <--- TUTAJ JEST WYNIK
-                "AI": pick,
-                "Kurs": f"{played_odd:.2f}",
-                "Value": f"{val_percent * 100:.1f}%",
-                "Status": res
-            })
-
-    if rows:
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    # Zabezpieczenie - musimy mieć na czym trenować
+    if len(df_sorted) < 100:
+        st.warning("Za mało danych w bazie, by przeprowadzić uczciwy test (potrzeba min. 100 meczów historycznych).")
     else:
-        st.warning("Brak okazji inwestycyjnych (Value > 5%) w ostatnich 50 meczach dla tej ligi.")
+        # 2. Podział: Ostatnie 50 to TEST, reszta to TRENING
+        test_size = 50
+        train_df = df_sorted.iloc[:-test_size]
+        test_df = df_sorted.iloc[-test_size:].copy()  # To są te mecze, które pokażemy w tabeli
+
+        # 3. Trening modelu "Historycznego" (który nie zna przyszłości)
+        # Używamy lekkich parametrów (n_estimators=150), żeby było szybko
+        history_model = xgb.XGBClassifier(n_estimators=150, learning_rate=0.02, max_depth=3, n_jobs=1)
+
+        if bet_type == "Zwycięzca (1X2)":
+            target = train_df['FTR'].map({'A': 0, 'D': 1, 'H': 2})
+            history_model.fit(train_df[features], target)
+        else:
+            target = np.where((train_df['FTHG'] + train_df['FTAG']) > 2.5, 1, 0)
+            history_model.fit(train_df[features], target)
+
+        # 4. Predykcja na zbiorze testowym (odwracamy kolejność, żeby najnowsze były na górze)
+        rows = []
+        # Sortujemy test_df od najnowszych do wyświetlania
+        test_view = test_df.sort_values("Date", ascending=False)
+
+        for idx, row in test_view.iterrows():
+            input_dict = {col: row[col] for col in features if col in row}
+            try:
+                if bet_type == "Zwycięzca (1X2)":
+                    if pd.isna(row['B365H']) or pd.isna(row['B365A']): continue
+                    input_dict['OddsDiff'] = (1 / row['B365H']) - (1 / row['B365A'])
+                else:
+                    if pd.isna(row['B365_O25']) or pd.isna(row['B365_U25']): continue
+                    input_dict['OddsDiff'] = (1 / row['B365_O25']) - (1 / row['B365_U25'])
+            except:
+                continue
+
+            clean = pd.DataFrame([input_dict])[features]
+
+            pick, odd, val_perc, res = "PAS", 0.0, 0.0, "⚪"
+
+            if bet_type == "Zwycięzca (1X2)":
+                probs = history_model.predict_proba(clean)[0]
+                vh = (probs[2] * row['B365H']) - 1
+                va = (probs[0] * row['B365A']) - 1
+
+                if vh > 0.05:
+                    pick = "HOME";
+                    odd = row['B365H'];
+                    val_perc = vh;
+                    res = "🟢 WIN" if row['FTR'] == 'H' else "🔴 LOSS"
+                elif va > 0.05:
+                    pick = "AWAY";
+                    odd = row['B365A'];
+                    val_perc = va;
+                    res = "🟢 WIN" if row['FTR'] == 'A' else "🔴 LOSS"
+            else:
+                po = history_model.predict_proba(clean)[0][1]
+                vo = (po * row['B365_O25']) - 1
+                vu = ((1 - po) * row['B365_U25']) - 1
+                gls = row['FTHG'] + row['FTAG']
+
+                if vo > 0.05:
+                    pick = "OVER";
+                    odd = row['B365_O25'];
+                    val_perc = vo;
+                    res = "🟢 WIN" if gls > 2.5 else "🔴 LOSS"
+                elif vu > 0.05:
+                    pick = "UNDER";
+                    odd = row['B365_U25'];
+                    val_perc = vu;
+                    res = "🟢 WIN" if gls < 2.5 else "🔴 LOSS"
+
+            # Dodajemy tylko jeśli była decyzja (żeby nie śmiecić tabeli PAS-ami)
+            if pick != "PAS":
+                rows.append({
+                    "Data": row['Date'].strftime('%d.%m'),
+                    "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
+                    "Wynik": f"{int(row['FTHG'])}-{int(row['FTAG'])}",
+                    "AI": pick,
+                    "Kurs": f"{odd:.2f}",
+                    "Value": f"{val_perc * 100:.1f}%",
+                    "Status": res
+                })
+
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        else:
+            st.warning("Model historyczny nie znalazłby żadnej okazji > 5% Value w ostatnich 50 meczach.")
