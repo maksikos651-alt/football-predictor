@@ -135,51 +135,97 @@ def calculate_kelly(prob, odds, bankroll, fraction):
 
 
 # --- NOWA FUNKCJA DYNAMICZNEGO ROI ---
-def calculate_dynamic_roi(df, model, features, bet_type, last_n=150):
-    recent_games = df.sort_values("Date", ascending=False).head(last_n).copy()
-    profit = 0
-    stakes = 0
+def calculate_real_roi(df, bet_type):
+    """
+    Oblicza UCZCIWE ROI, trenując model na przeszłości (80%)
+    i testując na przyszłości (20%).
+    """
+    # Musimy mieć minimum danych, żeby to miało sens
+    if len(df) < 100: return 0.0, 0
 
-    for idx, row in recent_games.iterrows():
+    # 1. Sortujemy chronologicznie
+    df = df.sort_values("Date")
+
+    # 2. Dzielimy na Trening (80%) i Test (20%)
+    split_idx = int(len(df) * 0.80)
+    train_df = df.iloc[:split_idx]
+    test_df = df.iloc[split_idx:].copy()
+
+    # 3. Trenujemy OSOBNY, tymczasowy model tylko na starej części
+    # (Dzięki temu model nie zna wyników meczów, które obstawia)
+    features = ['OddsDiff', 'Home_Att', 'Away_Att', 'Home_Def', 'Away_Def', 'Home_Form', 'Away_Form',
+                'Home_Corners_Avg', 'Away_Corners_Avg', 'Home_Shots_Avg', 'Away_Shots_Avg', 'Home_Cards_Avg',
+                'Away_Cards_Avg', 'Home_Fouls_Avg', 'Away_Fouls_Avg']
+
+    temp_model = xgb.XGBClassifier(n_estimators=150, learning_rate=0.02, max_depth=3, n_jobs=1)
+
+    if bet_type == "1X2":
+        # Trening
+        target = train_df['FTR'].map({'A': 0, 'D': 1, 'H': 2})
+        cols = features + ['B365H', 'B365A', 'B365D']
+        temp_model.fit(train_df[features], target)
+    else:
+        # Trening O/U
+        target = np.where((train_df['FTHG'] + train_df['FTAG']) > 2.5, 1, 0)
+        temp_model.fit(train_df[features], target)
+
+    # 4. Symulacja na części TESTOWEJ (ostatnie 20%)
+    bankroll = 1000.0
+    stakes_sum = 0
+    profit = 0
+
+    for idx, row in test_df.iterrows():
+        # Rekonstrukcja danych (tak jak w historii)
         input_dict = {col: row[col] for col in features if col in row}
         try:
             if bet_type == "1X2":
-                if pd.isna(row['B365H']) or pd.isna(row['B365A']): continue
+                if pd.isna(row['B365H']): continue
                 input_dict['OddsDiff'] = (1 / row['B365H']) - (1 / row['B365A'])
             else:
-                if pd.isna(row['B365_O25']) or pd.isna(row['B365_U25']): continue
+                if pd.isna(row['B365_O25']): continue
                 input_dict['OddsDiff'] = (1 / row['B365_O25']) - (1 / row['B365_U25'])
         except:
             continue
 
         clean_input = pd.DataFrame([input_dict])[features]
 
+        # Predykcja
         if bet_type == "1X2":
-            probs = model.predict_proba(clean_input)[0]
-            outcomes = [(2, probs[2], row['B365H']), (0, probs[0], row['B365A'])]
+            probs = temp_model.predict_proba(clean_input)[0]
+            outcomes = [(2, probs[2], row['B365H']), (0, probs[0], row['B365A'])]  # Home, Away
         else:
-            p_over = model.predict_proba(clean_input)[0][1]
-            outcomes = [(1, p_over, row['B365_O25']), (0, 1 - p_over, row['B365_U25'])]
+            p_over = temp_model.predict_proba(clean_input)[0][1]
+            outcomes = [(1, p_over, row['B365_O25']), (0, 1 - p_over, row['B365_U25'])]  # Over, Under
+
+        # Szukamy Value
+        best_val = 0
+        final_stake = 0
+        win_amount = 0
 
         for target, prob, odd in outcomes:
-            if (prob * odd) - 1 > 0.05:  # Value > 5%
+            val = (prob * odd) - 1
+            if val > 0.05:  # Próg 5%
                 stake = calculate_kelly(prob, odd, 1000, 0.1)
                 if stake > 0:
-                    stakes += stake
-                    # Check win
+                    final_stake = stake
+                    # Sprawdzamy czy weszło
                     if bet_type == "1X2":
                         real = 2 if row['FTR'] == 'H' else (0 if row['FTR'] == 'A' else 1)
                     else:
                         real = 1 if (row['FTHG'] + row['FTAG']) > 2.5 else 0
 
                     if real == target:
-                        profit += (stake * odd) - stake
+                        win_amount = (stake * odd) - stake
                     else:
-                        profit -= stake
-                    break  # One bet per match
+                        win_amount = -stake
+                    break  # Gramy tylko 1 typ na mecz
 
-    roi = (profit / stakes * 100) if stakes > 0 else 0.0
-    return roi, len(recent_games)
+        if final_stake > 0:
+            stakes_sum += final_stake
+            profit += win_amount
+
+    roi = (profit / stakes_sum * 100) if stakes_sum > 0 else 0.0
+    return roi, len(test_df)
 
 
 def get_h2h_history(df, team1, team2):
@@ -246,11 +292,13 @@ with st.spinner("Przetwarzanie danych..."):
     model, features = train_model(processed_data, train_mode)
 
 # DYNAMIC ROI CALCULATION
-roi_live, games_count = calculate_dynamic_roi(processed_data, model, features, "1X2" if train_mode == "1X2" else "OU")
+# --- ROI JEST TERAZ LICZONE NA OSOBNYM ZBIORZE TESTOWYM (BEZ OSZUKIWANIA) ---
+roi_live, games_count = calculate_real_roi(processed_data, "1X2" if bet_type == "Zwycięzca (1X2)" else "OU")
 
 st.sidebar.divider()
-st.sidebar.subheader("📊 Dynamiczne ROI")
-st.sidebar.caption(f"Wynik na ostatnich {games_count} meczach:")
+st.sidebar.subheader("📊 Uczciwe ROI (Backtest)")
+st.sidebar.caption(f"Wynik z ostatnich {games_count} meczów (których model nie widział podczas treningu):")
+
 if roi_live > 0:
     st.sidebar.success(f"📈 +{roi_live:.2f}%")
 else:
