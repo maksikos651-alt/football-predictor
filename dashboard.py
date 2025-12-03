@@ -568,7 +568,7 @@ with tab3:
                 rows.append({
                     "Data": row['Date'].strftime('%d.%m'),
                     "Mecz": f"{row['HomeTeam']} vs {row['AwayTeam']}",
-                    "Wynik": f"{int(row['FTHG'])}-{int(row['FTAG'])}",
+                    "Wynik": f"{int(row['FTHG'])}-{int(row['FTAG'])}" if pd.notnull(row['FTHG']) else "?-?",
                     "AI": pick,
                     "Kurs": f"{odd:.2f}",
                     "Value": f"{val_perc * 100:.1f}%",
